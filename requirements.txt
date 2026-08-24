@@ -1,0 +1,10 @@
+# pip 镜像加速（Docker 构建内 pip install -r 也会读取这些选项）
+--index-url https://repo.huaweicloud.com/repository/pypi/simple
+--trusted-host repo.huaweicloud.com
+
+# AgentArts 平台 SDK（核心依赖，提供 AgentArtsRuntimeApp 运行时框架）
+agentarts-sdk
+# 讯飞 API 调用
+requests>=2.31.0
+# 本地开发 .env 加载
+python-dotenv>=1.0.0
