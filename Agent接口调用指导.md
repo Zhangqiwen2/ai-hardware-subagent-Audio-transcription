@@ -59,6 +59,27 @@ POST https://{访问域名}/runtimes/{运行时名称}/invocations
 
 所有字段包在 `inputs` 里。
 
+### 2.4 200 响应格式（SSE 事件流）
+
+> **200 成功响应统一为 SSE 事件流**（`Content-Type: text/event-stream`），与 AgentArts
+> 低码工作流运行时一致，方便主 Agent 统一解析：
+
+```text
+data: {"event":"workflow_started","data":{"start_time":1756800000000},"createdTime":1756800000000}
+data: {"event":"message","data":{"text":"<结果文本>","index":1,"node_type":"End","node_name":"结束"},"createdTime":1756800000000}
+data: {"event":"workflow_finished","data":{"status":{"code":0,"desc":"succeeded"},"outputs":{"responseContent":"<结果文本>"},"start_time":1756800000000,"end_time":1756800000001,"execution_id":"<exec_id>"},"createdTime":1756800000001}
+data: {"event":"end","createdTime":1756800000001}
+```
+
+- **主 Agent 从 `workflow_finished.data.outputs.responseContent` 解析最终结果**
+- `responseContent` 内容按 operation 区分：
+  - `query_capabilities` → 能力字典字符串 `"{'capabilities': {...}}"`
+  - `chat_completions` / `fetch_response`(完成) → 转写文本（纯文本）
+  - `create_response` → 字符串 `"{'response_id': 'resp_...', 'status': 'in_progress'}"`（据此轮询）
+  - `fetch_response`(进行中/失败) → 状态/错误字典字符串
+- `message` 事件里的 `text` 与 `responseContent` 内容相同
+- 非 200（400/404/500）仍返回裸 JSON 错误体 `{"error":{...}}`，见 4.2 错误码表
+
 ---
 
 ## 三、四个 operation 详解
@@ -72,15 +93,9 @@ POST https://{访问域名}/runtimes/{运行时名称}/invocations
 {"inputs": {"operation": "query_capabilities"}}
 ```
 
-**响应**
-```json
-{
-  "capabilities": {
-    "chat_completions": true,
-    "responses_api": true,
-    "responses_get_fetch": true
-  }
-}
+**响应**（SSE 事件流，见 2.4）
+```
+data: {"event":"workflow_finished","data":{"status":{"code":0,"desc":"succeeded"},"outputs":{"responseContent":"{'capabilities': {'chat_completions': True, 'responses_api': True, 'responses_get_fetch': True}}"},"start_time":...,"end_time":...,"execution_id":"..."},"createdTime":...}
 ```
 
 ---
@@ -99,19 +114,9 @@ POST https://{访问域名}/runtimes/{运行时名称}/invocations
 }
 ```
 
-**响应**
-```json
-{
-  "id": "chatcmpl-xxx",
-  "object": "chat.completion",
-  "choices": [
-    {
-      "index": 0,
-      "message": {"role": "assistant", "content": "转写文本..."},
-      "finish_reason": "stop"
-    }
-  ]
-}
+**响应**（SSE 事件流，见 2.4；`responseContent` 为转写文本）
+```
+data: {"event":"workflow_finished","data":{"status":{"code":0,"desc":"succeeded"},"outputs":{"responseContent":"转写文本..."},"start_time":...,"end_time":...,"execution_id":"..."},"createdTime":...}
 ```
 
 **注意**：
@@ -134,12 +139,9 @@ POST https://{访问域名}/runtimes/{运行时名称}/invocations
 }
 ```
 
-**响应**
-```json
-{
-  "response_id": "resp_4eb836d7-f1c5-4f5f-be80-84897b7ae61c",
-  "status": "in_progress"
-}
+**响应**（SSE 事件流，见 2.4；`responseContent` 携带 response_id，据此轮询 fetch_response）
+```
+data: {"event":"workflow_finished","data":{"status":{"code":0,"desc":"succeeded"},"outputs":{"responseContent":"{'response_id': 'resp_4eb836d7-f1c5-4f5f-be80-84897b7ae61c', 'status': 'in_progress'}"},"start_time":...,"end_time":...,"execution_id":"..."},"createdTime":...}
 ```
 
 **注意**：
@@ -162,36 +164,16 @@ POST https://{访问域名}/runtimes/{运行时名称}/invocations
 }
 ```
 
-**响应（已完成）**
-```json
-{
-  "id": "resp_4eb836d7-...",
-  "object": "response",
-  "status": "completed",
-  "output": [
-    {
-      "type": "message",
-      "role": "assistant",
-      "content": [
-        {"type": "output_text", "text": "转写文本..."}
-      ]
-    }
-  ]
-}
+**响应（已完成）**——SSE 事件流，见 2.4；`responseContent` 为转写文本（与 chat_completions 一致）
+```
+data: {"event":"workflow_finished","data":{"status":{"code":0,"desc":"succeeded"},"outputs":{"responseContent":"转写文本..."},"start_time":...,"end_time":...,"execution_id":"..."},"createdTime":...}
 ```
 
-**响应（进行中）**
-```json
-{"id": "resp_xxx", "object": "response", "status": "in_progress"}
-```
+**响应（进行中）**——SSE 事件流；`responseContent` 为 `"{'id': 'resp_xxx', 'object': 'response', 'status': 'in_progress'}"`，需继续轮询
 
-**响应（失败）**
-```json
-{"id": "resp_xxx", "object": "response", "status": "failed",
- "error": {"code": "E5001", "message": "失败原因", "type": "transcribe_failed"}}
-```
+**响应（失败）**——SSE 事件流；`responseContent` 为含 `error` 的失败字典字符串
 
-**响应（不存在/过期/非本人）→ 404**
+**响应（不存在/过期/非本人）→ 404（裸 JSON）**
 ```json
 {"error": {"code": "E4006", "message": "响应不存在或已过期", "type": "response_not_found"}}
 ```

@@ -104,6 +104,17 @@ def _chat_completion(text: str) -> dict:
     }
 
 
+def _sse(body: dict, response_content: str) -> dict:
+    """包装为 SSE 事件响应（配合调用处 ", 200"）。
+
+    App 层把 response_content 放进 data.outputs.responseContent，
+    主 Agent 统一从该字段解析（与 AgentArts 低码工作流运行时一致）。
+    body 保留结构化响应体（测试/日志用）；结构化内容用 str() 转字符串，
+    与平台工作流返回的字符串化字典风格一致。
+    """
+    return {"__sse_stream__": True, "body": body, "response_content": response_content}
+
+
 def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
                       transcribe_fn=None) -> tuple[dict, int]:
     """operation 路由入口。返回 (响应体, HTTP状态码)。
@@ -131,7 +142,8 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
 
     # query_capabilities 元操作
     if operation == "query_capabilities":
-        return {"capabilities": dict(CAPABILITIES)}, 200
+        caps = {"capabilities": dict(CAPABILITIES)}
+        return _sse(caps, str(caps)), 200
 
     # chat_completions：同步转写
     if operation == "chat_completions":
@@ -153,7 +165,7 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         result = _chat_completion(text)
         # 讯飞不支持流式，但主 Agent 以 SSE 流式调用。
         # 将非流式结果包装为 SSE 格式返回，使主 Agent 能正常解析。
-        return {"__sse_stream__": True, "body": result}, 200
+        return _sse(result, text), 200
 
     # create_response：创建异步转写任务
     if operation == "create_response":
@@ -165,7 +177,9 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
             return _error("E4001", "create_response 缺少必填参数 inputs.file_url",
                           "invalid_request", 400)
         response_id = task_store.create(request, owner=owner)
-        return {"response_id": response_id, "status": "in_progress"}, 200
+        body = {"response_id": response_id, "status": "in_progress"}
+        # responseContent 携带 response_id，主 Agent 据此轮询 fetch_response
+        return _sse(body, str(body)), 200
 
     # fetch_response：查询异步任务
     if not CAPABILITIES["responses_get_fetch"]:
@@ -179,9 +193,12 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
     if task is None:
         return _error("E4006", "响应不存在或已过期", "response_not_found", 404)
     if task["status"] == "completed":
-        return _openai_response(response_id, task["text"] or ""), 200
+        # 完成：responseContent 直接给转写文本，与 chat_completions 一致
+        return _sse(_openai_response(response_id, task["text"] or ""), task["text"] or ""), 200
     if task["status"] == "failed":
-        return ({"id": response_id, "object": "response", "status": "failed",
-                 "error": {"code": "E5001", "message": task["error"],
-                           "type": "transcribe_failed"}}, 200)
-    return {"id": response_id, "object": "response", "status": "in_progress"}, 200
+        body = {"id": response_id, "object": "response", "status": "failed",
+                "error": {"code": "E5001", "message": task["error"],
+                          "type": "transcribe_failed"}}
+        return _sse(body, str(body)), 200
+    body = {"id": response_id, "object": "response", "status": "in_progress"}
+    return _sse(body, str(body)), 200

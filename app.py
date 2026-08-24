@@ -7,11 +7,15 @@
   - GET  /ping          健康检查（SDK 默认）
 
 operation 路由（capabilities：同步+异步都支持）：
-  - query_capabilities -> 200 {capabilities:{...}}
-  - chat_completions（含无 operation 默认）-> 200 OpenAI chat.completion（同步阻塞转写）
-  - create_response    -> 200 {response_id:"resp_{uuid}", status:"in_progress"}（后台转写）
-  - fetch_response     -> 200 完整OpenAI response对象 / in_progress / failed；404 E4006
+  - query_capabilities -> 200 SSE 事件，responseContent=能力字典字符串
+  - chat_completions（含无 operation 默认）-> 200 SSE 事件，responseContent=转写文本
+  - create_response    -> 200 SSE 事件，responseContent={response_id, status}
+  - fetch_response     -> 200 SSE 事件，responseContent=转写文本/失败/进行中；404 E4006
   - 未知 operation      -> 400 E4001
+
+200 成功响应统一包装为 SSE 事件流（workflow_started -> message -> workflow_finished
+-> end），文本放进 data.outputs.responseContent，主 Agent 统一从该字段解析（与
+AgentArts 低码工作流运行时一致）。
 
 HTTP 状态码对齐 spec 错误码表（E4001/E4007->400，E4006->404）：
   路由返回 (body, status) 二元组；非 200 时用 Starlette JSONResponse 返回真实状态码。
@@ -57,11 +61,12 @@ def handler(payload: dict, context: RequestContext = None):
             import json as _json
             import time
             import uuid
-            data = body["body"]
             # 主 Agent 以 SSE 流式调用，期望与 AgentArts 工作流运行时一致的
-            # 事件序列，最终从 data.outputs.responseContent 取转写文本。
+            # 事件序列，最终从 data.outputs.responseContent 取结果文本。
             # 只有我们实际拥有的字段（没有的不编造）。
-            text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+            # response_content 由 operation_router 按 operation 生成：
+            #   转写类 -> 纯文本；能力/任务类 -> 字符串化字典。
+            text = body.get("response_content", "") or ""
             start_ms = int(time.time() * 1000)
             exec_id = uuid.uuid4().hex
 
