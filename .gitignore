@@ -23,3 +23,4 @@ test_audio/
 
 # AgentArts 本地配置（含运行时 ID 等）
 .agentarts_config.yaml
+*.pdf

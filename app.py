@@ -56,29 +56,30 @@ def handler(payload: dict, context: RequestContext = None):
             from starlette.responses import StreamingResponse
             import json as _json
             import time
+            import uuid
             data = body["body"]
-            # 主 Agent 以 SSE 流式调用，按 OpenAI 流式 chunk 格式解析
-            # （取 choices[0].delta.content）。把非流式结果改写为流式 chunk 输出。
+            # 主 Agent 以 SSE 流式调用，期望与 AgentArts 工作流运行时一致的
+            # 事件序列，最终从 data.outputs.responseContent 取转写文本。
+            # 只有我们实际拥有的字段（没有的不编造）。
             text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-            cid = data.get("id") or "chatcmpl-stream"
-            created = int(time.time())
+            start_ms = int(time.time() * 1000)
+            exec_id = uuid.uuid4().hex
 
-            def _chunk(delta, finish_reason):
-                return {
-                    "id": cid,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": "asr-agent",
-                    "choices": [{"index": 0, "delta": delta,
-                                 "finish_reason": finish_reason}],
-                }
+            def _event(ev, payload):
+                return f"data: {_json.dumps({'event': ev, 'data': payload,
+                                             'createdTime': int(time.time() * 1000)}, ensure_ascii=False)}\n\n"
 
             async def event_stream():
-                # 标准 OpenAI 流式序列：role 先行 -> 内容 -> finish_reason=stop
-                yield f"event: message\ndata: {_json.dumps(_chunk({'role': 'assistant', 'content': ''}, None), ensure_ascii=False)}\n\n"
-                yield f"event: message\ndata: {_json.dumps(_chunk({'content': text}, None), ensure_ascii=False)}\n\n"
-                yield f"event: message\ndata: {_json.dumps(_chunk({}, 'stop'), ensure_ascii=False)}\n\n"
-                yield "event: done\ndata: [DONE]\n\n"
+                yield _event("workflow_started", {"start_time": start_ms})
+                yield _event("message", {"text": text, "index": 1,
+                                         "node_type": "End", "node_name": "结束"})
+                yield _event("workflow_finished", {
+                    "status": {"code": 0, "desc": "succeeded"},
+                    "outputs": {"responseContent": text},
+                    "start_time": start_ms, "end_time": int(time.time() * 1000),
+                    "execution_id": exec_id,
+                })
+                yield _event("end")
             return StreamingResponse(event_stream(), media_type="text/event-stream")
         return body
     from starlette.responses import JSONResponse  # agentarts-sdk 基于 Starlette，运行时可用
