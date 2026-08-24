@@ -71,8 +71,8 @@ def handler(payload: dict, context: RequestContext = None):
             exec_id = uuid.uuid4().hex
 
             def _event(ev, payload):
-                return f"data: {_json.dumps({'event': ev, 'data': payload,
-                                             'createdTime': int(time.time() * 1000)}, ensure_ascii=False)}\n\n"
+                # 注意：f-string 表达式必须保持单行（Python 3.12 之前不支持跨行）
+                return f"data: {_json.dumps({'event': ev, 'data': payload, 'createdTime': int(time.time() * 1000)}, ensure_ascii=False)}\n\n"
 
             async def event_stream():
                 yield _event("workflow_started", {"start_time": start_ms})
