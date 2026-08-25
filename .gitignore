@@ -24,3 +24,24 @@ test_audio/
 # AgentArts 本地配置（含运行时 ID 等）
 .agentarts_config.yaml
 *.pdf
+
+# 本地镜像备份
+asr-agent.tar
+
+# 文档类文件（不纳入代码仓库，本地保留）
+API接口定义.md
+Agent接口调用指导.md
+DEPLOY.md
+使用文档.md
+响应时间摸底报告.md
+实现文档.md
+接口定义文档.md
+接口测试报告.md
+整合联调接口手册.md
+构建部署指导手册.md
+样例报文.md
+联调指南.md
+联调请求样例集.md
+设计文档.md
+设计文档spec.md
+设计文档改造.md
