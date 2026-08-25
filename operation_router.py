@@ -75,18 +75,56 @@ def _extract_request(inputs: dict) -> dict:
     return result
 
 
-def _openai_response(response_id: str, text: str) -> dict:
+def _openai_response(response_id: str, text: str, task: dict) -> dict:
+    """completed 状态的完整 OpenAI response 格式。"""
     return {
         "id": response_id,
         "object": "response",
+        "created_at": int(task["created_at"]),
+        "completed_at": int(task.get("completed_at") or task["created_at"]),
         "status": "completed",
+        "model": None,
+        "error": None,
         "output": [
             {
+                "id": f"msg_{uuid.uuid4()}",
                 "type": "message",
+                "status": "completed",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": text}],
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         ],
+        "metadata": None,
+    }
+
+
+def _in_progress_response(response_id: str, task: dict) -> dict:
+    """in_progress 状态的 OpenAI response 格式（create_response / fetch_response 共用）。"""
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(task["created_at"]),
+        "completed_at": None,
+        "status": "in_progress",
+        "model": None,
+        "error": None,
+        "output": [],
+        "metadata": None,
+    }
+
+
+def _failed_response(response_id: str, task: dict) -> dict:
+    """failed 状态的 OpenAI response 格式。"""
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(task["created_at"]),
+        "completed_at": int(task.get("completed_at") or task["created_at"]),
+        "status": "failed",
+        "model": None,
+        "error": {"code": "E5001", "message": task["error"]},
+        "output": [],
+        "metadata": None,
     }
 
 
@@ -165,7 +203,8 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         result = _chat_completion(text)
         # 讯飞不支持流式，但主 Agent 以 SSE 流式调用。
         # 将非流式结果包装为 SSE 格式返回，使主 Agent 能正常解析。
-        return _sse(result, text), 200
+        # chat_completions: responseContent 需包一层 message（主 Agent 解析要求）
+        return _sse(result, {"message": text}), 200
 
     # create_response：创建异步转写任务
     if operation == "create_response":
@@ -176,10 +215,12 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         if not request.get("file_url"):
             return _error("E4001", "create_response 缺少必填参数 inputs.file_url",
                           "invalid_request", 400)
-        response_id = task_store.create(request, owner=owner)
-        body = {"response_id": response_id, "status": "in_progress"}
+        # 优先复用主 Agent 传入的 response_id（保证 session 亲和路由到同一沙箱）
+        response_id = task_store.create(request, owner=owner,
+                                        response_id=inputs.get("response_id"))
+        task = task_store.fetch(response_id, owner=owner)
         # responseContent 携带 response_id，主 Agent 据此轮询 fetch_response
-        return _sse(body, str(body)), 200
+        return _sse(_in_progress_response(response_id, task), response_id), 200
 
     # fetch_response：查询异步任务
     if not CAPABILITIES["responses_get_fetch"]:
@@ -194,11 +235,10 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         return _error("E4006", "响应不存在或已过期", "response_not_found", 404)
     if task["status"] == "completed":
         # 完成：responseContent 直接给转写文本，与 chat_completions 一致
-        return _sse(_openai_response(response_id, task["text"] or ""), task["text"] or ""), 200
+        return _sse(_openai_response(response_id, task["text"] or "", task),
+                     task["text"] or ""), 200
     if task["status"] == "failed":
-        body = {"id": response_id, "object": "response", "status": "failed",
-                "error": {"code": "E5001", "message": task["error"],
-                          "type": "transcribe_failed"}}
-        return _sse(body, str(body)), 200
-    body = {"id": response_id, "object": "response", "status": "in_progress"}
-    return _sse(body, str(body)), 200
+        return _sse(_failed_response(response_id, task),
+                     str({"error": task["error"]})), 200
+    return _sse(_in_progress_response(response_id, task),
+                 str({"status": "in_progress"})), 200

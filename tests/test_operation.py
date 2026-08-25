@@ -105,7 +105,7 @@ def main():
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.wav"]}}, store2)
     assert status == 200 and body["status"] == "in_progress", (status, body)
-    rid = body["response_id"]
+    rid = body["id"]
     assert rid.startswith("resp_"), body
 
     assert started.wait(2), "后台任务未启动"
@@ -135,7 +135,7 @@ def main():
     store3 = make_store(fail_runner)
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.wav"]}}, store3)
-    rid3 = body["response_id"]
+    rid3 = body["id"]
     wait_status(store3, rid3, "failed")
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": rid3}}, store3)
@@ -146,7 +146,7 @@ def main():
     store4 = make_store(lambda req, **kw: "ok")
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.wav"]}}, store4)
-    rid4 = body["response_id"]
+    rid4 = body["id"]
     wait_status(store4, rid4, "completed")
     with store4._lock:
         store4._tasks[rid4]["created_at"] -= TASK_TTL_SECONDS + 1
@@ -160,7 +160,7 @@ def main():
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.wav"]}},
                         store5, owner="userA")
-    rid5 = body["response_id"]
+    rid5 = body["id"]
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": rid5}}, store5, owner="userB")
     assert status == 404 and body["error"]["code"] == "E4006", (status, body)
@@ -175,7 +175,7 @@ def main():
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.mp3"],
                                      "model_config": [{"type": "offline_asr"}]}}, store6)
-    rid6 = body["response_id"]
+    rid6 = body["id"]
     wait_status(store6, rid6, "completed")
     req = captured[0]
     assert req["file_url"] == "https://x/a.mp3" and req["model_config"] == [{"type": "offline_asr"}], req

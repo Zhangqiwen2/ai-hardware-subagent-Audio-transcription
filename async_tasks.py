@@ -36,9 +36,14 @@ class AsyncTaskStore:
         self._lock = threading.Lock()
         self._start_cleanup_thread()
 
-    def create(self, request_payload, owner=None) -> str:
-        """创建任务：起后台线程执行 runner，立即返回 response_id。"""
-        response_id = f"resp_{uuid.uuid4()}"
+    def create(self, request_payload, owner=None, response_id=None) -> str:
+        """创建任务：起后台线程执行 runner，立即返回 response_id。
+
+        response_id: 外部传入则复用（主 Agent 保证 session 亲和路由），
+                     不传则自动生成 resp_{uuid4}。
+        """
+        if response_id is None:
+            response_id = f"resp_{uuid.uuid4()}"
         with self._lock:
             self._evict_if_full()
             self._tasks[response_id] = {
@@ -81,6 +86,7 @@ class AsyncTaskStore:
                 if response_id in self._tasks:
                     self._tasks[response_id]["status"] = STATUS_COMPLETED
                     self._tasks[response_id]["text"] = text
+                    self._tasks[response_id]["completed_at"] = time.time()
         except Exception as e:
             timing.log_summary(label=f"async:{response_id[:12]}(failed)")
             logger.exception("异步转写任务失败 response_id=%s", response_id)
@@ -88,6 +94,7 @@ class AsyncTaskStore:
                 if response_id in self._tasks:
                     self._tasks[response_id]["status"] = STATUS_FAILED
                     self._tasks[response_id]["error"] = str(e)
+                    self._tasks[response_id]["completed_at"] = time.time()
 
     def _evict_if_full(self):
         """任务数达上限时先清过期，仍满则丢最旧任务（内存保护，调用方持锁）。"""
