@@ -46,8 +46,8 @@ def main():
     body, status = call({"inputs": {"operation": "query_capabilities"}}, store)
     assert status == 200, status
     assert body == {"capabilities": {"chat_completions": True,
-                                     "responses_api": True,
-                                     "responses_get_fetch": True}}, body
+                                     "create_response": True,
+                                     "fetch_response": True}}, body
     print("[1] query_capabilities -> 200 OK")
 
     # ---- 2. 未知 operation -> 400 E4001 ----

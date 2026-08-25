@@ -13,7 +13,7 @@
     }
   }
 
-能力声明：chat_completions=True, responses_api=True, responses_get_fetch=True
+能力声明：chat_completions=True, create_response=True, fetch_response=True
 """
 import logging
 import uuid
@@ -25,8 +25,8 @@ logger = logging.getLogger("operation_router")
 
 CAPABILITIES = {
     "chat_completions": True,
-    "responses_api": True,
-    "responses_get_fetch": True,
+    "create_response": True,
+    "fetch_response": True,
 }
 
 _VALID_OPERATIONS = ("query_capabilities", "chat_completions",
@@ -34,9 +34,9 @@ _VALID_OPERATIONS = ("query_capabilities", "chat_completions",
 
 
 def validate_capabilities() -> None:
-    """启动自检：get_fetch=true 必须 api=true。"""
-    if CAPABILITIES["responses_get_fetch"] and not CAPABILITIES["responses_api"]:
-        raise RuntimeError("capabilities 非法：responses_get_fetch=true 要求 responses_api=true")
+    """启动自检：fetch_response=true 必须 create_response=true。"""
+    if CAPABILITIES["fetch_response"] and not CAPABILITIES["create_response"]:
+        raise RuntimeError("capabilities 非法：fetch_response=true 要求 create_response=true")
 
 
 def _error(code: str, message: str, error_type: str, http_status: int) -> tuple[dict, int]:
@@ -208,8 +208,8 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
 
     # create_response：创建异步转写任务
     if operation == "create_response":
-        if not CAPABILITIES["responses_api"]:
-            return _error("E4007", "本 agent 未声明 responses_api 能力",
+        if not CAPABILITIES["create_response"]:
+            return _error("E4007", "本 agent 未声明 create_response 能力",
                           "capability_not_supported", 400)
         request = _extract_request(inputs)
         if not request.get("file_url"):
@@ -219,12 +219,12 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         response_id = task_store.create(request, owner=owner,
                                         response_id=inputs.get("response_id"))
         task = task_store.fetch(response_id, owner=owner)
-        # responseContent 携带 response_id，主 Agent 据此轮询 fetch_response
-        return _sse(_in_progress_response(response_id, task), response_id), 200
+        # 异步操作直接返回 OpenAI response 格式 body，不包 SSE
+        return _in_progress_response(response_id, task), 200
 
     # fetch_response：查询异步任务
-    if not CAPABILITIES["responses_get_fetch"]:
-        return _error("E4007", "本 agent 未声明 responses_get_fetch 能力",
+    if not CAPABILITIES["fetch_response"]:
+        return _error("E4007", "本 agent 未声明 fetch_response 能力",
                       "capability_not_supported", 400)
     response_id = inputs.get("response_id")
     if not response_id or not isinstance(response_id, str):
@@ -234,11 +234,8 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
     if task is None:
         return _error("E4006", "响应不存在或已过期", "response_not_found", 404)
     if task["status"] == "completed":
-        # 完成：responseContent 直接给转写文本，与 chat_completions 一致
-        return _sse(_openai_response(response_id, task["text"] or "", task),
-                     task["text"] or ""), 200
+        # 异步操作直接返回 OpenAI response 格式 body，不包 SSE
+        return _openai_response(response_id, task["text"] or "", task), 200
     if task["status"] == "failed":
-        return _sse(_failed_response(response_id, task),
-                     str({"error": task["error"]})), 200
-    return _sse(_in_progress_response(response_id, task),
-                 str({"status": "in_progress"})), 200
+        return _failed_response(response_id, task), 200
+    return _in_progress_response(response_id, task), 200
