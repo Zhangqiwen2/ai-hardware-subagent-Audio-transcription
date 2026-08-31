@@ -34,9 +34,35 @@ _URL_PREFIXES = ("http://", "https://")
 
 
 class TranscribeError(Exception):
-    """转写业务异常。"""
+    """转写业务异常（服务端问题，E5001）。"""
 
     pass
+
+
+class InvalidAudioError(TranscribeError):
+    """音频文件无效（客户端问题，E4002）：空文件、下载失败、非音频格式等。"""
+
+    pass
+
+
+# 常见图片文件魔数（明确拒绝，避免浪费转写调用；其余格式交给讯飞判断）
+_IMAGE_MAGIC = (
+    b"\xff\xd8\xff",  # JPEG
+    b"\x89PNG",       # PNG
+    b"GIF8",          # GIF
+    b"BM",            # BMP
+)
+
+
+def _check_audio_file(path: str) -> None:
+    """校验本地文件疑似音频：空文件或图片 -> InvalidAudioError。"""
+    if os.path.getsize(path) == 0:
+        raise InvalidAudioError("音频文件为空（0字节）")
+    with open(path, "rb") as f:
+        head = f.read(8)
+    for magic in _IMAGE_MAGIC:
+        if head.startswith(magic):
+            raise InvalidAudioError("文件不是音频格式（疑似图片），无法转写")
 
 
 # ---------- payload 解析 ----------
@@ -119,15 +145,17 @@ def _guess_suffix(file_url: str) -> str:
 
 
 def _resolve_to_local(payload) -> tuple[str, bool]:
-    """把 payload 解析为本地音频文件路径。返回 (local_path, is_tempfile)。"""
+    """把 payload 解析为本地音频文件路径。返回 (local_path, is_tempfile)。
+
+    客户端文件问题（不存在/空/非音频/下载失败）抛 InvalidAudioError（E4002）。
+    """
     file_path = _extract_file_path(payload)
     file_url = _extract_file_url(payload)
 
     if file_path:
         if not os.path.exists(file_path):
-            raise TranscribeError(f"音频文件不存在：{file_path}")
-        if os.path.getsize(file_path) == 0:
-            raise TranscribeError("音频文件为空（0字节），无法转写")
+            raise InvalidAudioError(f"音频文件不存在：{file_path}")
+        _check_audio_file(file_path)
         return file_path, False
 
     if file_url:
@@ -140,12 +168,14 @@ def _resolve_to_local(payload) -> tuple[str, bool]:
         except Exception as e:
             if os.path.exists(tmp.name):
                 os.unlink(tmp.name)
-            raise TranscribeError(f"下载音频失败：{e}") from e
-        # 空文件拦截（提前报错，避免 wave 模块抛出无消息的 EOFError）
-        if os.path.getsize(tmp.name) == 0:
+            raise InvalidAudioError(f"下载音频失败：{e}") from e
+        try:
+            # 空文件/图片拦截（提前报错，避免浪费转写调用）
+            _check_audio_file(tmp.name)
+        except InvalidAudioError:
             if os.path.exists(tmp.name):
                 os.unlink(tmp.name)
-            raise TranscribeError("下载的音频文件为空（0字节），请检查 file_url 指向的文件")
+            raise
         return tmp.name, True
 
     raise TranscribeError(

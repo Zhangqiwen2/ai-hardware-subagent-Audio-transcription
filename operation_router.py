@@ -21,6 +21,7 @@ import uuid
 
 from async_tasks import AsyncTaskStore
 from iflytek_asr import TimingInfo
+from service import InvalidAudioError
 
 logger = logging.getLogger("operation_router")
 
@@ -125,7 +126,7 @@ def _failed_response(response_id: str, task: dict) -> dict:
         "completed_at": int(task.get("completed_at") or task["created_at"]),
         "status": "failed",
         "model": None,
-        "error_code": "E5001",
+        "error_code": task.get("error_code", "E5001"),
         "error_msg": task["error"],
         "output": [],
         "metadata": None,
@@ -204,6 +205,10 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         try:
             timing = TimingInfo()
             text = transcribe_fn(request, timing=timing)
+        except InvalidAudioError as e:
+            # 客户端文件问题（空/图片/下载失败）-> E4002，主 Agent 可提示用户重传
+            logger.warning("音频文件无效: file_url=%s, 原因=%s", request.get("file_url"), e)
+            return _error("E4002", f"音频文件无效: {e}", "invalid_audio", 400)
         except Exception as e:
             logger.exception("转写异常: file_url=%s", request.get("file_url"))
             return _error("E5001", f"转写失败: {e}", "transcribe_failed", 500)

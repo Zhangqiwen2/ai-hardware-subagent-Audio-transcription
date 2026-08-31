@@ -14,6 +14,7 @@ import time
 import uuid
 
 from iflytek_asr import TimingInfo
+from service import InvalidAudioError
 
 logger = logging.getLogger("async_tasks")
 
@@ -90,10 +91,13 @@ class AsyncTaskStore:
         except Exception as e:
             timing.log_summary(label=f"async:{response_id[:12]}(failed)")
             logger.exception("异步转写任务失败 response_id=%s", response_id)
+            # 客户端文件问题（E4002）与服务端故障（E5001）区分，便于主 Agent 决策
+            error_code = "E4002" if isinstance(e, InvalidAudioError) else "E5001"
             with self._lock:
                 if response_id in self._tasks:
                     self._tasks[response_id]["status"] = STATUS_FAILED
                     self._tasks[response_id]["error"] = str(e)
+                    self._tasks[response_id]["error_code"] = error_code
                     self._tasks[response_id]["completed_at"] = time.time()
 
     def _evict_if_full(self):

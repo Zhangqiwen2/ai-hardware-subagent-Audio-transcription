@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_tasks import AsyncTaskStore, TASK_TTL_SECONDS
 from operation_router import handle_invocation, CAPABILITIES, validate_capabilities
+from service import InvalidAudioError
 
 
 def make_store(runner):
@@ -92,6 +93,15 @@ def main():
     assert status == 500 and body["error_code"] == "E5001", (status, body)
     print("[4d] 转写失败 -> 500 E5001 OK")
 
+    # ---- 4e. 音频文件无效（客户端问题）-> 400 E4002 ----
+    def sync_invalid_audio(req, **kw):
+        raise InvalidAudioError("下载的音频文件为空（0字节）")
+    body, status = call({"inputs": {"operation": "chat_completions",
+                                     "file_url": ["https://x/empty.wav"]}},
+                        store, transcribe_fn=sync_invalid_audio)
+    assert status == 400 and body["error_code"] == "E4002", (status, body)
+    print("[4e] 音频文件无效 -> 400 E4002 OK")
+
     # ---- 5. 异步全流程：create -> in_progress -> completed ----
     started = threading.Event()
     release = threading.Event()
@@ -140,7 +150,22 @@ def main():
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": rid3}}, store3)
     assert status == 200 and body["status"] == "failed", (status, body)
-    print("[7] 任务失败 -> failed OK")
+    assert body["error_code"] == "E5001" and body["error_msg"] == "异步炸了", body
+    print("[7] 任务失败 -> failed(E5001) OK")
+
+    # ---- 7b. 异步音频文件无效 -> failed + E4002 ----
+    def invalid_runner(req, **kw):
+        raise InvalidAudioError("文件不是音频格式（疑似图片）")
+    store3b = make_store(invalid_runner)
+    body, status = call({"inputs": {"operation": "create_response",
+                                     "file_url": ["https://x/img.jpg"]}}, store3b)
+    rid3b = body["id"]
+    wait_status(store3b, rid3b, "failed")
+    body, status = call({"inputs": {"operation": "fetch_response",
+                                     "response_id": rid3b}}, store3b)
+    assert status == 200 and body["status"] == "failed", (status, body)
+    assert body["error_code"] == "E4002", body
+    print("[7b] 异步音频无效 -> failed(E4002) OK")
 
     # ---- 8. 24h 过期 -> 404 E4006 ----
     store4 = make_store(lambda req, **kw: "ok")
