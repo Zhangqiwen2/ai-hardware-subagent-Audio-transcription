@@ -126,6 +126,8 @@ def _resolve_to_local(payload) -> tuple[str, bool]:
     if file_path:
         if not os.path.exists(file_path):
             raise TranscribeError(f"音频文件不存在：{file_path}")
+        if os.path.getsize(file_path) == 0:
+            raise TranscribeError("音频文件为空（0字节），无法转写")
         return file_path, False
 
     if file_url:
@@ -139,6 +141,11 @@ def _resolve_to_local(payload) -> tuple[str, bool]:
             if os.path.exists(tmp.name):
                 os.unlink(tmp.name)
             raise TranscribeError(f"下载音频失败：{e}") from e
+        # 空文件拦截（提前报错，避免 wave 模块抛出无消息的 EOFError）
+        if os.path.getsize(tmp.name) == 0:
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+            raise TranscribeError("下载的音频文件为空（0字节），请检查 file_url 指向的文件")
         return tmp.name, True
 
     raise TranscribeError(

@@ -193,7 +193,11 @@ class XfyunAsrClient:
         if duration_check_disable is None:
             duration_check_disable = not is_wav
         if not duration_check_disable:
-            duration_ms = self._get_wav_duration_ms(file_path)
+            try:
+                duration_ms = self._get_wav_duration_ms(file_path)
+            except EOFError:
+                # wave 模块对空/损坏文件抛 EOFError（str 为空），转译为明确消息
+                raise RuntimeError("音频文件为空或损坏，无法解析 WAV 头") from None
             logger.info("上传音频：%s（%s 字节，%d 毫秒）", audio_name, audio_size, duration_ms)
         else:
             logger.info("上传音频：%s（%s 字节，非WAV关闭时长校验）", audio_name, audio_size)

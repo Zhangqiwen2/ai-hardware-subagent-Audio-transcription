@@ -41,9 +41,9 @@ def validate_capabilities() -> None:
 
 
 def _error(code: str, message: str, error_type: str, http_status: int) -> tuple[dict, int]:
-    """统一错误格式：顶层 errorcode + errormessage，方便主 Agent 解析。"""
+    """统一错误格式：顶层 error_code + error_msg，方便主 Agent 解析。"""
     logger.error("[%s] %s (type=%s, http=%d)", code, message, error_type, http_status)
-    return {"errorcode": code, "errormessage": message}, http_status
+    return {"error_code": code, "error_msg": message}, http_status
 
 
 def _unwrap_inputs(payload: dict) -> dict:
@@ -117,7 +117,7 @@ def _in_progress_response(response_id: str, task: dict) -> dict:
 
 
 def _failed_response(response_id: str, task: dict) -> dict:
-    """failed 状态的 OpenAI response 格式（errorcode/errormessage 统一字段）。"""
+    """failed 状态的 OpenAI response 格式（error_code/error_msg 统一字段）。"""
     return {
         "id": response_id,
         "object": "response",
@@ -125,8 +125,8 @@ def _failed_response(response_id: str, task: dict) -> dict:
         "completed_at": int(task.get("completed_at") or task["created_at"]),
         "status": "failed",
         "model": None,
-        "errorcode": "E5001",
-        "errormessage": task["error"],
+        "error_code": "E5001",
+        "error_msg": task["error"],
         "output": [],
         "metadata": None,
     }
