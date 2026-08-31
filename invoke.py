@@ -20,7 +20,7 @@ from agentarts.sdk.service.runtime_client import RuntimeClient
 from agentarts.sdk.service.http_client import SignMode
 
 GATEWAY_DOMAIN = "defaultgw-grstqnldg5.cn-southwest-2.huaweicloud-agentarts.com"
-RUNTIME_NAME = "runtime-fdwpvnrb-luyin"
+RUNTIME_NAME = "asr-agent"
 REGION = "cn-southwest-2"
 
 

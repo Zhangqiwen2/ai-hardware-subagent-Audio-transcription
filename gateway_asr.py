@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
-"""ConvAIRouter 网关转写客户端（Bearer 认证）。
+"""ConvAIAgent 网关转写客户端（Bearer 认证 + JSON 协议）。
 
-按 FE2026080500089 设计：Agent 用 model_config 注入的 endpoint + auth_token
-调用 ConvAIRouter 的 /v2/upload 与 /v2/getResult（路径与讯飞一致），
-ConvAIRouter 校验 Bearer 后转发给讯飞并透传结果。
+按 2026-08-20 重构后的 RuntimeInvocationController 协议调用：
+- POST /internal/v2/upload    请求体 {"audio_url": "...", "options": {...}}
+- POST /internal/v2/getResult 请求体 {"order_id": "..."}
 
-请求/响应沿用讯飞 Ifasr_llm 的格式（ConvAIRouter 转发），差异：
-- 不做 HMAC-SHA1 签名，改用 Authorization: Bearer <auth_token>
-- 不传 appId/accessKeyId 等讯飞身份参数（由 ConvAIRouter 侧注入）
+鉴权：Authorization: Bearer（model_config.auth_token 注入）。
+网关内部用 audioMode=urlLink 让讯飞直接拉取 audio_url，故本客户端只传 URL，不再上传二进制。
+
+响应是讯飞原始 JSON 透传（code/descInfo/content/orderId/orderInfo/orderResult），
+本客户端仅做 code 校验与 orderId/orderInfo 提取，orderResult 解析复用 result_parser。
 """
 import json
 import logging
-import os
 import time
 
 import requests
 
-from iflytek_asr import TimingInfo, XfyunAsrClient
+from iflytek_asr import TimingInfo
 from result_parser import parse_order_result
 
 logger = logging.getLogger("gateway_asr")
@@ -27,7 +28,7 @@ STATUS_FAILED = -1
 
 
 class GatewayAsrClient:
-    """通过 ConvAIRouter 调讯飞离线转写的客户端（Bearer 认证）。
+    """通过 ConvAIAgent 网关调讯飞离线转写的客户端（Bearer 认证 + JSON 协议）。
 
     upload_url 和 result_url 由调用方传入完整地址（不拼接），
     分别来自 model_config 中 type=offline_asr_upload 和 type=offline_asr_get_result 的 endpoint。
@@ -53,38 +54,26 @@ class GatewayAsrClient:
 
     # ---------- 上传 ----------
 
-    def upload_audio(self, file_path: str, language: str = "autodialect", pd: str = "") -> str:
-        """上传音频到 ConvAIRouter，返回 orderId。"""
-        file_path = os.path.abspath(file_path)
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"音频文件不存在：{file_path}")
+    def upload_audio(self, file_url: str, language: str = "autodialect", pd: str = "") -> str:
+        """提交音频 URL 到 ConvAIAgent 网关，返回 orderId。
 
-        audio_name = os.path.basename(file_path)
-        is_wav = file_path.lower().endswith(".wav")
-        params = {
-            "fileName": audio_name,
-            "fileSize": str(os.path.getsize(file_path)),
-            "language": language,
-        }
+        网关用 audioMode=urlLink 让讯飞直接拉取 audio_url，故只传 URL 不传二进制。
+        """
+        if not file_url or not file_url.strip().lower().startswith(("http://", "https://")):
+            raise ValueError(f"音频 URL 非法：{file_url}")
+
+        options = {"language": language}
         if pd:
-            params["pd"] = pd
-        # WAV 用 wave 模块算时长；非 WAV 关闭时长校验（讯飞自算）
-        if is_wav:
-            params["duration"] = str(XfyunAsrClient._get_wav_duration_ms(file_path))
-        else:
-            params["durationCheckDisable"] = "true"
-
+            options["pd"] = pd
+        body = {"audio_url": file_url, "options": options}
         headers = {
             "Authorization": self.bearer,
-            "Content-Type": "application/octet-stream",
+            "Content-Type": "application/json",
         }
-        logger.info("网关上传音频：%s（%s 字节）", audio_name, params["fileSize"])
+        logger.info("网关提交音频 URL：%s", file_url)
 
-        with open(file_path, "rb") as f:
-            audio_data = f.read()
         try:
-            resp = requests.post(self.upload_url, params=params,
-                                 headers=headers, data=audio_data, timeout=30)
+            resp = requests.post(self.upload_url, headers=headers, json=body, timeout=30)
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"网关上传请求失败：{e}") from e
@@ -100,7 +89,7 @@ class GatewayAsrClient:
 
     def get_result(self, order_id: str) -> dict:
         """轮询查询转写结果，直到订单完成或超时。返回完整响应字典。"""
-        params = {"orderId": order_id, "resultType": "transfer"}
+        body = {"order_id": order_id}
         headers = {
             "Authorization": self.bearer,
             "Content-Type": "application/json",
@@ -111,8 +100,7 @@ class GatewayAsrClient:
         while time.time() < deadline:
             attempt += 1
             try:
-                resp = requests.post(self.result_url, params=params,
-                                     headers=headers, data="{}", timeout=15)
+                resp = requests.post(self.result_url, headers=headers, json=body, timeout=15)
                 resp.raise_for_status()
             except requests.exceptions.RequestException as e:
                 logger.warning("网关查询失败（第%d次）：%s", attempt, e)
@@ -144,12 +132,12 @@ class GatewayAsrClient:
 
     # ---------- 一站式转写 ----------
 
-    def transcribe(self, file_path: str, language: str = "autodialect", pd: str = "",
+    def transcribe(self, file_url: str, language: str = "autodialect", pd: str = "",
                    timing: TimingInfo = None) -> str:
-        """上传 + 轮询 + 解析，返回转写纯文本。"""
+        """提交 URL + 轮询 + 解析，返回转写纯文本。"""
         # --- 上传计时 ---
         t_upload_start = time.time()
-        order_id = self.upload_audio(file_path, language=language, pd=pd)
+        order_id = self.upload_audio(file_url, language=language, pd=pd)
         t_upload_end = time.time()
 
         # --- 轮询/处理计时 ---

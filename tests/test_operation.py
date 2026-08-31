@@ -52,12 +52,12 @@ def main():
 
     # ---- 2. 未知 operation -> 400 E4001 ----
     body, status = call({"inputs": {"operation": "do_something"}}, store)
-    assert status == 400 and body["error"]["code"] == "E4001", (status, body)
+    assert status == 400 and body["errorcode"] == "E4001", (status, body)
     print("[2] 未知 operation -> 400 E4001 OK")
 
     # ---- 3. 缺 inputs -> 400 E4001 ----
     body, status = call({"operation": "query_capabilities"}, store)
-    assert status == 400 and body["error"]["code"] == "E4001", (status, body)
+    assert status == 400 and body["errorcode"] == "E4001", (status, body)
     print("[3] 缺 inputs 包装 -> 400 E4001 OK")
 
     # ---- 4. chat_completions 同步转写（file_url 数组）----
@@ -80,7 +80,7 @@ def main():
     # ---- 4c. chat_completions 缺 file_url -> 400 E4001 ----
     body, status = call({"inputs": {"operation": "chat_completions"}},
                         store, transcribe_fn=sync_fn)
-    assert status == 400 and body["error"]["code"] == "E4001", (status, body)
+    assert status == 400 and body["errorcode"] == "E4001", (status, body)
     print("[4c] 缺 file_url -> 400 E4001 OK")
 
     # ---- 4d. chat_completions 转写失败 -> 500 E5001 ----
@@ -89,7 +89,7 @@ def main():
     body, status = call({"inputs": {"operation": "chat_completions",
                                      "file_url": ["https://x/a.wav"]}},
                         store, transcribe_fn=sync_fail)
-    assert status == 500 and body["error"]["code"] == "E5001", (status, body)
+    assert status == 500 and body["errorcode"] == "E5001", (status, body)
     print("[4d] 转写失败 -> 500 E5001 OK")
 
     # ---- 5. 异步全流程：create -> in_progress -> completed ----
@@ -123,10 +123,10 @@ def main():
 
     # ---- 6. fetch 缺 response_id / 不存在 ----
     body, status = call({"inputs": {"operation": "fetch_response"}}, store2)
-    assert status == 400 and body["error"]["code"] == "E4001", (status, body)
+    assert status == 400 and body["errorcode"] == "E4001", (status, body)
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": "resp_not_exist"}}, store2)
-    assert status == 404 and body["error"]["code"] == "E4006", (status, body)
+    assert status == 404 and body["errorcode"] == "E4006", (status, body)
     print("[6] 缺 response_id / 不存在 -> E4001/E4006 OK")
 
     # ---- 7. 任务失败 ----
@@ -152,7 +152,7 @@ def main():
         store4._tasks[rid4]["created_at"] -= TASK_TTL_SECONDS + 1
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": rid4}}, store4)
-    assert status == 404 and body["error"]["code"] == "E4006", (status, body)
+    assert status == 404 and body["errorcode"] == "E4006", (status, body)
     print("[8] 24h 过期 -> 404 E4006 OK")
 
     # ---- 9. owner 归属校验 ----
@@ -163,7 +163,7 @@ def main():
     rid5 = body["id"]
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": rid5}}, store5, owner="userB")
-    assert status == 404 and body["error"]["code"] == "E4006", (status, body)
+    assert status == 404 and body["errorcode"] == "E4006", (status, body)
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": rid5}}, store5, owner="userA")
     assert status == 200, (status, body)
@@ -184,15 +184,15 @@ def main():
     # ---- 11. 空 file_url 数组 / 非数组 ----
     body, status = call({"inputs": {"operation": "chat_completions",
                                      "file_url": []}}, store, transcribe_fn=sync_fn)
-    assert status == 400 and body["error"]["code"] == "E4001", (status, body)
+    assert status == 400 and body["errorcode"] == "E4001", (status, body)
     body, status = call({"inputs": {"operation": "chat_completions",
                                      "file_url": [None]}}, store, transcribe_fn=sync_fn)
-    assert status == 400 and body["error"]["code"] == "E4001", (status, body)
+    assert status == 400 and body["errorcode"] == "E4001", (status, body)
     print("[11] 空/无效 file_url 数组 -> E4001 OK")
 
     # ---- 12. 非 dict 请求体 ----
     body, status = call("just a string", store)
-    assert status == 400 and body["error"]["code"] == "E4001", (status, body)
+    assert status == 400 and body["errorcode"] == "E4001", (status, body)
     print("[12] 非 dict 请求体 -> 400 E4001 OK")
 
     print("\n全部测试通过（统一 inputs 格式版）✓")

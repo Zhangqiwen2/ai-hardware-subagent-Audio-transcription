@@ -15,6 +15,7 @@
 
 能力声明：chat_completions=True, create_response=True, fetch_response=True
 """
+import json
 import logging
 import uuid
 
@@ -40,7 +41,9 @@ def validate_capabilities() -> None:
 
 
 def _error(code: str, message: str, error_type: str, http_status: int) -> tuple[dict, int]:
-    return {"error": {"code": code, "message": message, "type": error_type}}, http_status
+    """统一错误格式：顶层 errorcode + errormessage，方便主 Agent 解析。"""
+    logger.error("[%s] %s (type=%s, http=%d)", code, message, error_type, http_status)
+    return {"errorcode": code, "errormessage": message}, http_status
 
 
 def _unwrap_inputs(payload: dict) -> dict:
@@ -114,7 +117,7 @@ def _in_progress_response(response_id: str, task: dict) -> dict:
 
 
 def _failed_response(response_id: str, task: dict) -> dict:
-    """failed 状态的 OpenAI response 格式。"""
+    """failed 状态的 OpenAI response 格式（errorcode/errormessage 统一字段）。"""
     return {
         "id": response_id,
         "object": "response",
@@ -122,7 +125,8 @@ def _failed_response(response_id: str, task: dict) -> dict:
         "completed_at": int(task.get("completed_at") or task["created_at"]),
         "status": "failed",
         "model": None,
-        "error": {"code": "E5001", "message": task["error"]},
+        "errorcode": "E5001",
+        "errormessage": task["error"],
         "output": [],
         "metadata": None,
     }
@@ -163,24 +167,27 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         owner: 调用方标识（任务归属校验）
         transcribe_fn: 同步转写函数 (request) -> str
     """
+    logger.info("收到请求: %s", json.dumps(payload, ensure_ascii=False)[:2000])
+
     if not isinstance(payload, dict):
         return _error("E4001", "请求体必须是 JSON 对象", "invalid_request", 400)
 
     # 解包统一 inputs 层（唯一格式，必须有 inputs 字段）
     inputs = _unwrap_inputs(payload)
     if not inputs:
-        return _error("E4001", "请求体缺少 inputs 字段或格式不正确", "invalid_request", 400)
+        return _error("E4001", f"请求体缺少 inputs 字段或格式不正确, payload={payload}", "invalid_request", 400)
 
     # 缺省 operation 默认 chat_completions
     operation = inputs.get("operation") or "chat_completions"
 
     # 校验1：operation 合法性
     if operation not in _VALID_OPERATIONS:
-        return _error("E4001", f"未知的 operation: {operation}", "invalid_request", 400)
+        return _error("E4001", f"未知的 operation: {operation}, inputs={inputs}", "invalid_request", 400)
 
     # query_capabilities 元操作
     if operation == "query_capabilities":
         caps = {"capabilities": dict(CAPABILITIES)}
+        logger.info("query_capabilities: %s", caps)
         return _sse(caps, str(caps)), 200
 
     # chat_completions：同步转写
@@ -190,7 +197,7 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
                           "capability_not_supported", 400)
         request = _extract_request(inputs)
         if not request.get("file_url"):
-            return _error("E4001", "chat_completions 缺少必填参数 inputs.file_url",
+            return _error("E4001", f"chat_completions 缺少必填参数 inputs.file_url, inputs={inputs}",
                           "invalid_request", 400)
         if transcribe_fn is None:
             return _error("E5001", "未注入同步转写函数", "internal_error", 500)
@@ -198,9 +205,11 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
             timing = TimingInfo()
             text = transcribe_fn(request, timing=timing)
         except Exception as e:
+            logger.exception("转写异常: file_url=%s", request.get("file_url"))
             return _error("E5001", f"转写失败: {e}", "transcribe_failed", 500)
         timing.log_summary(label="sync")
         result = _chat_completion(text)
+        logger.info("chat_completions 成功: text_len=%d, file_url=%s", len(text), request.get("file_url"))
         # 讯飞不支持流式，但主 Agent 以 SSE 流式调用。
         # 将非流式结果包装为 SSE 格式返回，使主 Agent 能正常解析。
         # chat_completions: responseContent 需包一层 message（主 Agent 解析要求）
@@ -213,12 +222,13 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
                           "capability_not_supported", 400)
         request = _extract_request(inputs)
         if not request.get("file_url"):
-            return _error("E4001", "create_response 缺少必填参数 inputs.file_url",
+            return _error("E4001", f"create_response 缺少必填参数 inputs.file_url, inputs={inputs}",
                           "invalid_request", 400)
         # 优先复用主 Agent 传入的 response_id（保证 session 亲和路由到同一沙箱）
         response_id = task_store.create(request, owner=owner,
                                         response_id=inputs.get("response_id"))
         task = task_store.fetch(response_id, owner=owner)
+        logger.info("create_response 成功: response_id=%s, file_url=%s", response_id, request.get("file_url"))
         # 异步操作直接返回 OpenAI response 格式 body，不包 SSE
         return _in_progress_response(response_id, task), 200
 
@@ -228,14 +238,17 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
                       "capability_not_supported", 400)
     response_id = inputs.get("response_id")
     if not response_id or not isinstance(response_id, str):
-        return _error("E4001", "fetch_response 缺少必填参数 inputs.response_id",
+        return _error("E4001", f"fetch_response 缺少必填参数 inputs.response_id, inputs={inputs}",
                       "invalid_request", 400)
     task = task_store.fetch(response_id, owner=owner)
     if task is None:
-        return _error("E4006", "响应不存在或已过期", "response_not_found", 404)
+        return _error("E4006", f"响应不存在或已过期, response_id={response_id}", "response_not_found", 404)
     if task["status"] == "completed":
+        logger.info("fetch_response 完成: response_id=%s, text_len=%d", response_id, len(task["text"] or ""))
         # 异步操作直接返回 OpenAI response 格式 body，不包 SSE
         return _openai_response(response_id, task["text"] or "", task), 200
     if task["status"] == "failed":
+        logger.warning("fetch_response 失败: response_id=%s, error=%s", response_id, task.get("error"))
         return _failed_response(response_id, task), 200
+    logger.info("fetch_response 处理中: response_id=%s", response_id)
     return _in_progress_response(response_id, task), 200

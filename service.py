@@ -4,20 +4,18 @@
 支持新设计（FE2026080500089）请求格式：
   {
     "input": {"file_url": "录音文件URL"},
-    "model_config": [{
-      "type": "offline_asr",
-      "provider": "openai-compatible",
-      "endpoint": "讯飞API endpoint（指向ConvAIRouter）",
-      "model_name": "讯飞模型名称",
-      "auth_token": "Bearer 认证token"
-    }]
+    "model_config": [
+      {"type": "offline_asr_upload",     "endpoint": "https:///v2/upload",    "auth_token": ""},
+      {"type": "offline_asr_get_result", "endpoint": "https:///v2/getResult", "auth_token": ""}
+    ]
   }
 
-向后兼容旧格式（本地测试）：
-  {"file_path": "/data/x.wav"} / {"audio_url": "https://..."} 等
+有 model_config 时走 ConvAIAgent 网关（Bearer 认证 + JSON 协议）：
+file_url 直接交给网关，网关用 audioMode=urlLink 让讯飞拉取，无需本地下载。
 
-过渡期：model_config 解析后暂存不用，仍用环境变量密钥直调讯飞。
-等 ConvAIRouter 认证方式确认后，改用 model_config 的 endpoint+auth_token 调 ConvAIRouter。
+向后兼容旧格式（本地测试，无 model_config）：
+  {"file_path": "/data/x.wav"} / {"audio_url": "https://..."} 等
+  走环境变量密钥直调讯飞，需本地下载二进制上传。
 """
 import logging
 import os
@@ -155,24 +153,37 @@ def transcribe_from_payload(payload, timing: TimingInfo = None) -> str:
     """解析 payload -> 定位音频 -> 转写 -> 返回纯文本。
 
     调用方式（二选一，按 payload 自动选择）：
-    - 有 model_config（含 endpoint + auth_token）：走 ConvAIRouter 网关（Bearer 认证）
-    - 无 model_config：过渡期直调讯飞（环境变量密钥，本地测试用）
+    - 有 model_config（含 endpoint + auth_token）：走 ConvAIAgent 网关（Bearer 认证），
+      直接把 file_url 交给网关（网关用 audioMode=urlLink 让讯飞拉取），无需本地下载
+    - 无 model_config：过渡期直调讯飞（环境变量密钥，本地测试用），需本地下载二进制上传
 
     如果传入 timing=TimingInfo()，会记录完整的耗时分解（agent + iflytek）。
     """
     t_agent_start = time.time()
 
-    # 定位音频文件（下载耗时计入 agent_overhead）
-    local_path, is_tmp = _resolve_to_local(payload)
+    # 解析 model_config：两条独立配置（upload + get_result），有则走网关
+    upload_url, result_url, auth_token = _extract_model_config(payload)
+    use_gateway = bool(upload_url and result_url and auth_token)
 
-    t_after_resolve = time.time()
+    # 网关路径直接传 URL；直调讯飞路径需先下载到本地
+    if use_gateway:
+        audio_source = _extract_file_url(payload)
+        if not audio_source:
+            raise TranscribeError(
+                "网关转写缺少音频 URL，需提供 input.file_url。"
+                " 示例：{\"input\":{\"file_url\":\"https://.../x.mp3\"},\"model_config\":[...]}"
+            )
+        local_path = None
+        is_tmp = False
+    else:
+        local_path, is_tmp = _resolve_to_local(payload)
+        audio_source = local_path
+
     if timing is not None:
-        timing.agent_overhead = t_after_resolve - t_agent_start
+        timing.agent_overhead = time.time() - t_agent_start
 
     try:
-        # 解析 model_config：两条独立配置（upload + get_result），有则走网关
-        upload_url, result_url, auth_token = _extract_model_config(payload)
-        if upload_url and result_url and auth_token:
+        if use_gateway:
             client = GatewayAsrClient(
                 upload_url=upload_url,
                 result_url=result_url,
@@ -194,7 +205,7 @@ def transcribe_from_payload(payload, timing: TimingInfo = None) -> str:
                 poll_max_wait=settings.poll_max_wait,
             )
         return client.transcribe(
-            local_path, language=settings.language, pd=settings.pd,
+            audio_source, language=settings.language, pd=settings.pd,
             timing=timing,
         )
     except TranscribeError:
@@ -204,5 +215,5 @@ def transcribe_from_payload(payload, timing: TimingInfo = None) -> str:
     except Exception as e:
         raise TranscribeError(str(e)) from e
     finally:
-        if is_tmp and os.path.exists(local_path):
+        if is_tmp and local_path and os.path.exists(local_path):
             os.unlink(local_path)
