@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 
 from config import settings
 from gateway_asr import GatewayAsrClient
-from iflytek_asr import TimingInfo, XfyunAsrClient
+from iflytek_asr import TimingInfo, XfyunAsrClient, InvalidAudioError  # noqa: F401 重导出（兼容既有导入）
 
 logger = logging.getLogger("transcribe_service")
 
@@ -38,11 +38,8 @@ class TranscribeError(Exception):
 
     pass
 
-
-class InvalidAudioError(TranscribeError):
-    """音频文件无效（客户端问题，E4002）：空文件、下载失败、非音频格式等。"""
-
-    pass
+# InvalidAudioError 定义在 iflytek_asr.py（两个客户端都要抛），此处重导出保持兼容。
+# 注意：它不再是 TranscribeError 子类，except 分支需同时捕获两者。
 
 
 # 常见图片文件魔数（明确拒绝，避免浪费转写调用；其余格式交给讯飞判断）
@@ -245,7 +242,7 @@ def transcribe_from_payload(payload, timing: TimingInfo = None) -> str:
             audio_source, language=settings.language, pd=settings.pd,
             timing=timing,
         )
-    except TranscribeError:
+    except (TranscribeError, InvalidAudioError):
         raise
     except TimeoutError as e:
         raise TranscribeError(str(e)) from e

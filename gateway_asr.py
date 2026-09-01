@@ -17,7 +17,7 @@ import time
 
 import requests
 
-from iflytek_asr import TimingInfo
+from iflytek_asr import TimingInfo, raise_for_failtype
 from result_parser import parse_order_result
 
 logger = logging.getLogger("gateway_asr")
@@ -120,9 +120,9 @@ class GatewayAsrClient:
                 logger.info("网关转写完成（共查询 %d 次）", attempt)
                 return result
             if status == STATUS_FAILED:
-                raise RuntimeError(f"网关转写失败：status={status}, failType={fail_type}")
+                raise_for_failtype(fail_type, status)
             if fail_type != 0:
-                raise RuntimeError(f"网关转写异常：failType={fail_type}, status={status}")
+                raise_for_failtype(fail_type, status)
 
             logger.info("网关转写处理中（第%d次，status=%s），%ds 后重试...",
                         attempt, status, self.poll_interval)

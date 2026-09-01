@@ -34,6 +34,48 @@ from result_parser import parse_order_result
 logger = logging.getLogger("iflytek_asr")
 
 
+class InvalidAudioError(Exception):
+    """音频文件无效（客户端问题，E4002）：空文件、非音频格式、静音文件、损坏等。"""
+
+
+# 讯飞订单 failType -> 中文说明（getResult 的 orderInfo.failType）
+FAILTYPE_DESC = {
+    0: "正常",
+    1: "音频上传失败",
+    2: "音频转码失败（文件损坏或格式不支持）",
+    3: "音频识别失败",
+    4: "音频时长超限（最大 5 小时）",
+    5: "音频校验失败",
+    6: "静音/空音频文件，无可转写内容",
+    7: "翻译失败",
+    8: "账号无翻译权限",
+    9: "转写质检失败",
+    10: "转写质检未匹配出关键词",
+    11: "upload接口未开启对应能力",
+    12: "音频语种分析失败",
+    99: "其他",
+}
+
+# 属于客户端文件问题的 failType（映射 E4002 提示用户检查文件；其余归服务端 E5001）
+CLIENT_FAULT_FAILTYPES = {2, 4, 5, 6}
+
+
+def raise_for_failtype(fail_type: int, status=None) -> None:
+    """按讯飞 failType 抛对应异常：客户端文件问题抛 InvalidAudioError，否则 RuntimeError。
+
+    网关路径不下载音频文件（urlLink 直传），本地无法预检，
+    客户端文件问题只能靠讯飞处理后的 failType 识别（如静音文件 failType=6）。
+    """
+    desc = FAILTYPE_DESC.get(fail_type, f"未知类型{fail_type}")
+    if status is not None:
+        detail = f"（failType={fail_type}, status={status}）"
+    else:
+        detail = f"（failType={fail_type}）"
+    if fail_type in CLIENT_FAULT_FAILTYPES:
+        raise InvalidAudioError(f"{desc}{detail}") from None
+    raise RuntimeError(f"{desc}{detail}") from None
+
+
 @dataclass
 class TimingInfo:
     """转写耗时分解（单位：秒）。
@@ -283,9 +325,9 @@ class XfyunAsrClient:
                 logger.info("转写完成（共查询 %d 次）", attempt)
                 return result
             if status == STATUS_FAILED:
-                raise RuntimeError(f"转写失败：status={status}, failType={fail_type}")
-            if fail_type not in (0,):
-                raise RuntimeError(f"转写异常：failType={fail_type}, status={status}")
+                raise_for_failtype(fail_type, status)
+            if fail_type != 0:
+                raise_for_failtype(fail_type, status)
 
             estimate = content.get("taskEstimateTime", "?")
             logger.info(

@@ -220,6 +220,21 @@ def main():
     assert status == 400 and body["error_code"] == "E4001", (status, body)
     print("[12] 非 dict 请求体 -> 400 E4001 OK")
 
+    # ---- 13. 讯飞 failType 映射：静音(6)/转码(2)/超限(4)/校验(5) -> E4002，其余 -> E5001 ----
+    from iflytek_asr import raise_for_failtype
+    for ft in (2, 4, 5, 6):
+        try:
+            raise_for_failtype(ft, status=-1)
+            assert False, f"failType={ft} 应抛 InvalidAudioError"
+        except InvalidAudioError as e:
+            assert "failType=%d" % ft in str(e), e
+    try:
+        raise_for_failtype(3, status=-1)
+        assert False, "failType=3 应抛 RuntimeError"
+    except RuntimeError as e:
+        assert "识别失败" in str(e), e
+    print("[13] failType 映射（静音/转码/超限/校验->E4002，识别失败->E5001）OK")
+
     print("\n全部测试通过（统一 inputs 格式版）✓")
 
 
