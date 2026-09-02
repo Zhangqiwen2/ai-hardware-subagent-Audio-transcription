@@ -70,9 +70,15 @@ def handler(payload: dict, context: RequestContext = None):
             start_ms = int(time.time() * 1000)
             exec_id = uuid.uuid4().hex
 
-            def _event(ev, payload):
+            def _event(ev, payload=None):
                 # 注意：f-string 表达式必须保持单行（Python 3.12 之前不支持跨行）
-                return f"data: {_json.dumps({'event': ev, 'data': payload, 'createdTime': int(time.time() * 1000)}, ensure_ascii=False)}\n\n"
+                # payload 可选：end 事件按平台协议不带 data 字段（此前 _event("end")
+                # 缺参会抛 TypeError，导致 end 事件从未发出、每个 SSE 响应刷 ASGI 错误）
+                if payload is None:
+                    obj = {'event': ev, 'createdTime': int(time.time() * 1000)}
+                else:
+                    obj = {'event': ev, 'data': payload, 'createdTime': int(time.time() * 1000)}
+                return f"data: {_json.dumps(obj, ensure_ascii=False)}\n\n"
 
             async def event_stream():
                 yield _event("workflow_started", {"start_time": start_ms})
