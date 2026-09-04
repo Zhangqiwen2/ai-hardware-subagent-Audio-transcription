@@ -17,7 +17,7 @@ import time
 
 import requests
 
-from iflytek_asr import TimingInfo, raise_for_failtype
+from iflytek_asr import TimingInfo, raise_for_failtype, http_error_detail
 from result_parser import parse_order_result
 
 logger = logging.getLogger("gateway_asr")
@@ -75,6 +75,10 @@ class GatewayAsrClient:
         try:
             resp = requests.post(self.upload_url, headers=headers, json=body, timeout=30)
             resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            # 附上网关响应体（网关侧的具体报错原因，此前被 raise_for_status 丢掉）
+            detail = http_error_detail(e)
+            raise RuntimeError(f"网关上传请求失败：{e}，网关响应体：{detail}") from e
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"网关上传请求失败：{e}") from e
 
@@ -102,6 +106,11 @@ class GatewayAsrClient:
             try:
                 resp = requests.post(self.result_url, headers=headers, json=body, timeout=15)
                 resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                detail = http_error_detail(e)
+                logger.warning("网关查询失败（第%d次）：%s，网关响应体：%s", attempt, e, detail)
+                time.sleep(self.poll_interval)
+                continue
             except requests.exceptions.RequestException as e:
                 logger.warning("网关查询失败（第%d次）：%s", attempt, e)
                 time.sleep(self.poll_interval)

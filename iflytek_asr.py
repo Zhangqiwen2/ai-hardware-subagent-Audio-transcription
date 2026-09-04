@@ -76,6 +76,18 @@ def raise_for_failtype(fail_type: int, status=None) -> None:
     raise RuntimeError(f"{desc}{detail}") from None
 
 
+def http_error_detail(e: Exception, limit: int = 500) -> str:
+    """从 HTTPError 提取响应体摘要（服务端返回错误状态时的具体原因）。
+
+    raise_for_status() 抛出的 HTTPError 只含状态码和 URL，响应体（网关/讯飞侧
+    的具体报错原因）会丢失，这里取回来截断，便于日志定位。
+    """
+    resp = getattr(e, "response", None)
+    if resp is None:
+        return ""
+    return (resp.text or "").strip()[:limit]
+
+
 @dataclass
 class TimingInfo:
     """转写耗时分解（单位：秒）。
@@ -269,6 +281,9 @@ class XfyunAsrClient:
         try:
             resp = requests.post(url, headers=headers, data=audio_data, timeout=30, verify=False)
             resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            detail = http_error_detail(e)
+            raise RuntimeError(f"上传请求失败：{e}，响应体：{detail}") from e
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"上传请求网络失败：{e}") from e
 
@@ -305,6 +320,11 @@ class XfyunAsrClient:
                     url, headers=headers, data=json.dumps({}), timeout=15, verify=False
                 )
                 resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                detail = http_error_detail(e)
+                logger.warning("查询请求失败（第%d次）：%s，响应体：%s", attempt, e, detail)
+                time.sleep(self.poll_interval)
+                continue
             except requests.exceptions.RequestException as e:
                 logger.warning("查询请求失败（第%d次）：%s", attempt, e)
                 time.sleep(self.poll_interval)
