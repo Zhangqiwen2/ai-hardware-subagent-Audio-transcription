@@ -183,14 +183,16 @@ def _resolve_to_local(payload) -> tuple[str, bool]:
 
 # ---------- 主入口 ----------
 
-def transcribe_from_payload(payload, timing: TimingInfo = None) -> str:
-    """解析 payload -> 定位音频 -> 转写 -> 返回纯文本。
+def transcribe_from_payload(payload, timing: TimingInfo = None) -> dict:
+    """解析 payload -> 定位音频 -> 转写 -> 返回 {"text": 纯文本, "sentences": 分段结果}。
 
     调用方式（二选一，按 payload 自动选择）：
     - 有 model_config（含 endpoint + auth_token）：走 ConvAIAgent 网关（Bearer 认证），
       直接把 file_url 交给网关（网关用 audioMode=urlLink 让讯飞拉取），无需本地下载
     - 无 model_config：过渡期直调讯飞（环境变量密钥，本地测试用），需本地下载二进制上传
 
+    上传默认开启角色分离（roleType=1 盲分），sentences 为分段级结果
+    （text + speakerId + beginTimeMs + endTimeMs，VAD 分段粒度）。
     如果传入 timing=TimingInfo()，会记录完整的耗时分解（agent + iflytek）。
     """
     t_agent_start = time.time()

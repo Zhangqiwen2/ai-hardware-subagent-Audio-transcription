@@ -18,9 +18,16 @@ def main():
     print(f"待转写音频：{audio_path}")
     print("=" * 60)
     try:
-        text = transcribe_from_payload({"file_path": audio_path})
-        print("转写结果：")
-        print(text)
+        result = transcribe_from_payload({"file_path": audio_path})
+        # 兼容新格式 {"text": ..., "sentences": [...]} 与旧格式 str
+        if isinstance(result, dict):
+            print("转写结果：")
+            print(result.get("text", ""))
+            if result.get("sentences"):
+                print(f"\n分段数：{len(result['sentences'])}")
+        else:
+            print("转写结果：")
+            print(result)
     except Exception as e:
         print(f"转写失败：{e}")
         sys.exit(1)

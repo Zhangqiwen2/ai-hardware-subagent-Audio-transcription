@@ -29,7 +29,7 @@ from typing import Optional
 
 import requests
 
-from result_parser import parse_order_result
+from result_parser import parse_order_result, parse_sentences
 
 logger = logging.getLogger("iflytek_asr")
 
@@ -264,6 +264,9 @@ class XfyunAsrClient:
             "fileSize": audio_size,
             "fileName": audio_name,
             "language": language,
+            # 说话人分离：通用角色分离 + 盲分（自动判断人数，最多10人）
+            "roleType": "1",
+            "roleNum": "0",
         }
         if pd:
             url_params["pd"] = pd
@@ -367,9 +370,10 @@ class XfyunAsrClient:
         pd: str = "",
         duration_check_disable: bool = None,
         timing: TimingInfo = None,
-    ) -> str:
-        """上传 + 轮询 + 解析，返回转写纯文本。duration_check_disable=None 时自动判断格式。
+    ) -> dict:
+        """上传 + 轮询 + 解析，返回 {"text": 纯文本, "sentences": 分段结果}。
 
+        duration_check_disable=None 时自动判断格式。
         如果传入 timing=TimingInfo()，会填充讯飞侧耗时（upload + process）。
         Agent 侧开销（下载等）由调用方在 timing.agent_overhead 中累加。
         """
@@ -389,6 +393,7 @@ class XfyunAsrClient:
         t_process_end = time.time()
 
         text = parse_order_result(result)
+        sentences = parse_sentences(result)
 
         # 填充 timing
         if timing is not None:
@@ -396,8 +401,8 @@ class XfyunAsrClient:
             timing.iflytek_process = t_process_end - t_process_start
             timing.log_summary(label="iflytek")
 
-        logger.info("转写文本长度：%d", len(text))
-        return text
+        logger.info("转写文本长度：%d，分段数：%d", len(text), len(sentences))
+        return {"text": text, "sentences": sentences}
 
     @staticmethod
     def _parse_json(text: str) -> dict:

@@ -128,8 +128,9 @@ def main():
                                      "response_id": rid}}, store2)
     assert status == 200, status
     assert body["id"] == rid and body["object"] == "response" and body["status"] == "completed", body
-    assert body["output"][0]["content"][0]["text"] == "异步文本:https://x/a.wav", body
-    print("[5] 异步全流程 + OpenAI response OK")
+    # text 字段保留，值从字符串改为 {"sentences": [...]}（runner 返回字符串，sentences 为空）
+    assert body["output"][0]["content"][0]["text"] == {"sentences": []}, body
+    print("[5] 异步全流程 + text 包 sentences OK")
 
     # ---- 6. fetch 缺 response_id / 不存在 ----
     body, status = call({"inputs": {"operation": "fetch_response"}}, store2)
@@ -234,6 +235,42 @@ def main():
     except RuntimeError as e:
         assert "识别失败" in str(e), e
     print("[13] failType 映射（静音/转码/超限/校验->E4002，识别失败->E5001）OK")
+
+    # ---- 14. 同步 responseContent.message 包 {"sentences": [...]}（字段名不变）----
+    def sync_speaker_fn(req, **kw):
+        return {"text": "全文", "sentences": [
+            {"text": "我们下周确认方案。", "speakerId": 1, "beginTimeMs": 4220, "endTimeMs": 6380},
+            {"text": "好的，我来记录下来。", "speakerId": 2, "beginTimeMs": 6710, "endTimeMs": 9210},
+        ]}
+    raw_body, raw_status = handle_invocation(
+        {"inputs": {"operation": "chat_completions", "file_url": ["https://x/a.wav"]}},
+        store, transcribe_fn=sync_speaker_fn)
+    assert raw_status == 200 and raw_body.get("__sse_stream__"), raw_body
+    resp_content = raw_body["response_content"]
+    # message 字段名不变，值从字符串改为 {"sentences": [...]}
+    assert "message" in resp_content and isinstance(resp_content["message"], dict), resp_content
+    assert "sentences" in resp_content["message"], resp_content
+    sentences = resp_content["message"]["sentences"]
+    assert len(sentences) == 2 and sentences[0]["speakerId"] == 1, sentences
+    assert raw_body["body"]["choices"][0]["message"]["content"] == "全文", raw_body
+    print("[14] 同步 responseContent.message = {\"sentences\": [...]} OK")
+
+    # ---- 15. 说话人分离：异步 output[0].content[0].text 包 {"sentences": [...]} ----
+    def async_speaker_runner(req, **kw):
+        return {"text": "全文", "sentences": [
+            {"text": "你好", "speakerId": 1, "beginTimeMs": 0, "endTimeMs": 100}]}
+    store7 = make_store(async_speaker_runner)
+    body, status = call({"inputs": {"operation": "create_response",
+                                     "file_url": ["https://x/a.wav"]}}, store7)
+    rid7 = body["id"]
+    wait_status(store7, rid7, "completed")
+    body, status = call({"inputs": {"operation": "fetch_response",
+                                     "response_id": rid7}}, store7)
+    assert status == 200 and body["status"] == "completed", (status, body)
+    # text 字段保留，值从字符串改为 {"sentences": [...]}
+    assert body["output"][0]["content"][0]["text"] == {"sentences": [
+        {"text": "你好", "speakerId": 1, "beginTimeMs": 0, "endTimeMs": 100}]}, body
+    print("[15] 异步 output[0].content[0].text = {\"sentences\": [...]} OK")
 
     print("\n全部测试通过（统一 inputs 格式版）✓")
 

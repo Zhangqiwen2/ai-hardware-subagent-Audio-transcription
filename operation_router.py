@@ -80,7 +80,11 @@ def _extract_request(inputs: dict) -> dict:
 
 
 def _openai_response(response_id: str, text: str, task: dict) -> dict:
-    """completed 状态的完整 OpenAI response 格式。"""
+    """completed 状态的完整 OpenAI response 格式。
+
+    全文不要了，sentences 包在原来的 text 字段里
+    （主 Agent 仍读 output[0].content[0].text，值从字符串改为 {"sentences": [...]}）。
+    """
     return {
         "id": response_id,
         "object": "response",
@@ -95,7 +99,8 @@ def _openai_response(response_id: str, text: str, task: dict) -> dict:
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
+                # 原来 text 是全文本字符串，现改为 {"sentences": [...]} 结构化数据
+                "content": [{"type": "output_text", "text": {"sentences": task.get("sentences") or []}}],
             }
         ],
         "metadata": None,
@@ -204,7 +209,7 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
             return _error("E5001", "未注入同步转写函数", "internal_error", 500)
         try:
             timing = TimingInfo()
-            text = transcribe_fn(request, timing=timing)
+            result = transcribe_fn(request, timing=timing)
         except InvalidAudioError as e:
             # 客户端文件问题（空/图片/下载失败）-> E4002，主 Agent 可提示用户重传
             logger.warning("音频文件无效: file_url=%s, 原因=%s", request.get("file_url"), e)
@@ -212,13 +217,22 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         except Exception as e:
             logger.exception("转写异常: file_url=%s", request.get("file_url"))
             return _error("E5001", f"转写失败: {e}", "transcribe_failed", 500)
+        # 兼容 str（旧测试 mock）与 dict（新结构化返回 {"text", "sentences"}）
+        if isinstance(result, dict):
+            text = result.get("text", "")
+            sentences = result.get("sentences") or []
+        else:
+            text = result
+            sentences = []
         timing.log_summary(label="sync")
-        result = _chat_completion(text)
-        logger.info("chat_completions 成功: text_len=%d, file_url=%s", len(text), request.get("file_url"))
+        body = _chat_completion(text)
+        logger.info("chat_completions 成功: text_len=%d, 分段数=%d, file_url=%s",
+                    len(text), len(sentences), request.get("file_url"))
         # 讯飞不支持流式，但主 Agent 以 SSE 流式调用。
         # 将非流式结果包装为 SSE 格式返回，使主 Agent 能正常解析。
-        # chat_completions: responseContent 需包一层 message（主 Agent 解析要求）
-        return _sse(result, {"message": text}), 200
+        # 主 Agent 仍读 responseContent.message（字段名不变），
+        # 值从全文本字符串改为 {"sentences": [...]} 结构化数据
+        return _sse(body, {"message": {"sentences": sentences}}), 200
 
     # create_response：创建异步转写任务
     if operation == "create_response":
