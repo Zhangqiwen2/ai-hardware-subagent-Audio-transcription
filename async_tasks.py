@@ -13,8 +13,7 @@ import threading
 import time
 import uuid
 
-from iflytek_asr import TimingInfo
-from service import InvalidAudioError
+from iflytek_asr import TimingInfo, InvalidAudioError
 
 logger = logging.getLogger("async_tasks")
 
@@ -81,12 +80,20 @@ class AsyncTaskStore:
         """后台线程：执行转写并回写状态。"""
         timing = TimingInfo()
         try:
-            text = self._runner(request_payload, timing=timing)
+            result = self._runner(request_payload, timing=timing)
+            # gateway 路径返回 dict {"text", "sentences"}
+            if isinstance(result, dict):
+                text = result.get("text", "")
+                sentences = result.get("sentences")
+            else:
+                text = result
+                sentences = None
             timing.log_summary(label=f"async:{response_id[:12]}")
             with self._lock:
                 if response_id in self._tasks:
                     self._tasks[response_id]["status"] = STATUS_COMPLETED
                     self._tasks[response_id]["text"] = text
+                    self._tasks[response_id]["sentences"] = sentences
                     self._tasks[response_id]["completed_at"] = time.time()
         except Exception as e:
             timing.log_summary(label=f"async:{response_id[:12]}(failed)")

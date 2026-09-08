@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""转写服务：解析请求 payload，定位音频，调讯飞转写，返回纯文本。
+"""转写服务：解析请求 payload，通过 ConvAIAgent 网关调讯飞转写。
 
-支持新设计（FE2026080500089）请求格式：
+请求格式（FE2026080500089）：
   {
     "input": {"file_url": "录音文件URL"},
     "model_config": [
@@ -10,27 +10,18 @@
     ]
   }
 
-有 model_config 时走 ConvAIAgent 网关（Bearer 认证 + JSON 协议）：
+仅支持网关路径（Bearer 认证 + JSON 协议）：
 file_url 直接交给网关，网关用 audioMode=urlLink 让讯飞拉取，无需本地下载。
-
-向后兼容旧格式（本地测试，无 model_config）：
-  {"file_path": "/data/x.wav"} / {"audio_url": "https://..."} 等
-  走环境变量密钥直调讯飞，需本地下载二进制上传。
+不支持直调讯飞（无环境变量密钥路径）。
 """
 import logging
-import os
-import tempfile
 import time
-import urllib.request
-from urllib.parse import urlparse
 
 from config import settings
 from gateway_asr import GatewayAsrClient
-from iflytek_asr import TimingInfo, XfyunAsrClient, InvalidAudioError  # noqa: F401 重导出（兼容既有导入）
+from iflytek_asr import TimingInfo
 
 logger = logging.getLogger("transcribe_service")
-
-_URL_PREFIXES = ("http://", "https://")
 
 
 class TranscribeError(Exception):
@@ -38,41 +29,15 @@ class TranscribeError(Exception):
 
     pass
 
-# InvalidAudioError 定义在 iflytek_asr.py（两个客户端都要抛），此处重导出保持兼容。
-# 注意：它不再是 TranscribeError 子类，except 分支需同时捕获两者。
-
-
-# 常见图片文件魔数（明确拒绝，避免浪费转写调用；其余格式交给讯飞判断）
-_IMAGE_MAGIC = (
-    b"\xff\xd8\xff",  # JPEG
-    b"\x89PNG",       # PNG
-    b"GIF8",          # GIF
-    b"BM",            # BMP
-)
-
-
-def _check_audio_file(path: str) -> None:
-    """校验本地文件疑似音频：空文件或图片 -> InvalidAudioError。"""
-    if os.path.getsize(path) == 0:
-        raise InvalidAudioError("音频文件为空（0字节）")
-    with open(path, "rb") as f:
-        head = f.read(8)
-    for magic in _IMAGE_MAGIC:
-        if head.startswith(magic):
-            raise InvalidAudioError("文件不是音频格式（疑似图片），无法转写")
-
 
 # ---------- payload 解析 ----------
 
-def _extract_file_url(payload) -> str | None:
-    """从 payload 提取音频 URL。
 
-    新格式：input.file_url
-    旧格式兼容：audio_url / message·prompt·input 为 URL
-    """
+def _extract_file_url(payload) -> str | None:
+    """从 payload 提取音频 URL。"""
     if isinstance(payload, str):
         s = payload.strip()
-        return s if s.lower().startswith(_URL_PREFIXES) else None
+        return s if s.lower().startswith(("http://", "https://")) else None
     if isinstance(payload, dict):
         # 顶层 file_url（operation_router 提取后的标准格式）
         if payload.get("file_url"):
@@ -80,27 +45,7 @@ def _extract_file_url(payload) -> str | None:
         # 新格式 input.file_url
         inp = payload.get("input")
         if isinstance(inp, dict) and inp.get("file_url"):
-            return inp["file_url"]
-        # 旧格式 audio_url
-        if payload.get("audio_url"):
-            return payload["audio_url"]
-        # 旧格式 message/prompt/input 字段为 URL
-        for key in ("message", "prompt"):
-            val = payload.get(key)
-            if isinstance(val, str) and val.strip().lower().startswith(_URL_PREFIXES):
-                return val.strip()
-    return None
-
-
-def _extract_file_path(payload) -> str | None:
-    """从 payload 提取本地文件路径（旧格式兼容，本地测试用）。"""
-    if isinstance(payload, dict):
-        if payload.get("file_path"):
-            return payload["file_path"]
-        for key in ("message", "prompt"):
-            val = payload.get(key)
-            if isinstance(val, str) and val.strip() and not val.strip().lower().startswith(_URL_PREFIXES):
-                return val.strip()
+            return inp.file_url
     return None
 
 
@@ -108,9 +53,6 @@ def _extract_model_config(payload) -> tuple[str | None, str | None, str | None]:
     """从 model_config 数组中提取上传和查询两个 endpoint。
 
     返回 (upload_url, result_url, auth_token)。
-    新格式（两条独立配置，endpoint 是完整 URL，不拼接）：
-      - type=offline_asr_upload     -> upload_url
-      - type=offline_asr_get_result -> result_url
     auth_token 从任一条目取（两条应一致）。
     """
     if not isinstance(payload, dict):
@@ -135,119 +77,50 @@ def _extract_model_config(payload) -> tuple[str | None, str | None, str | None]:
     return upload_url, result_url, auth_token
 
 
-def _guess_suffix(file_url: str) -> str:
-    """根据 URL 扩展名猜测音频文件后缀。"""
-    ext = os.path.splitext(urlparse(file_url).path)[1]
-    return ext or ".wav"
-
-
-def _resolve_to_local(payload) -> tuple[str, bool]:
-    """把 payload 解析为本地音频文件路径。返回 (local_path, is_tempfile)。
-
-    客户端文件问题（不存在/空/非音频/下载失败）抛 InvalidAudioError（E4002）。
-    """
-    file_path = _extract_file_path(payload)
-    file_url = _extract_file_url(payload)
-
-    if file_path:
-        if not os.path.exists(file_path):
-            raise InvalidAudioError(f"音频文件不存在：{file_path}")
-        _check_audio_file(file_path)
-        return file_path, False
-
-    if file_url:
-        os.makedirs(settings.tmp_dir, exist_ok=True)
-        suffix = _guess_suffix(file_url)
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, dir=settings.tmp_dir, delete=False)
-        tmp.close()
-        try:
-            urllib.request.urlretrieve(file_url, tmp.name)
-        except Exception as e:
-            if os.path.exists(tmp.name):
-                os.unlink(tmp.name)
-            raise InvalidAudioError(f"下载音频失败：{e}") from e
-        try:
-            # 空文件/图片拦截（提前报错，避免浪费转写调用）
-            _check_audio_file(tmp.name)
-        except InvalidAudioError:
-            if os.path.exists(tmp.name):
-                os.unlink(tmp.name)
-            raise
-        return tmp.name, True
-
-    raise TranscribeError(
-        "无法从 payload 解析音频来源，需提供 input.file_url 或 file_path。"
-        " 示例：{\"input\":{\"file_url\":\"https://.../x.mp3\"},\"model_config\":[...]}"
-    )
-
-
 # ---------- 主入口 ----------
 
-def transcribe_from_payload(payload, timing: TimingInfo = None) -> str:
-    """解析 payload -> 定位音频 -> 转写 -> 返回纯文本。
+def transcribe_from_payload(payload, timing: TimingInfo = None) -> dict:
+    """解析 payload -> 通过网关转写 -> 返回 {"text": 纯文本, "sentences": 分段结果}。
 
-    调用方式（二选一，按 payload 自动选择）：
-    - 有 model_config（含 endpoint + auth_token）：走 ConvAIAgent 网关（Bearer 认证），
-      直接把 file_url 交给网关（网关用 audioMode=urlLink 让讯飞拉取），无需本地下载
-    - 无 model_config：过渡期直调讯飞（环境变量密钥，本地测试用），需本地下载二进制上传
-
-    如果传入 timing=TimingInfo()，会记录完整的耗时分解（agent + iflytek）。
+    仅支持网关路径（需完整 model_config），不支持直调讯飞。
+    如果传入 timing=TimingInfo()，会记录完整的耗时分解（agent + gateway）。
     """
     t_agent_start = time.time()
 
-    # 解析 model_config：两条独立配置（upload + get_result），有则走网关
+    # 解析 model_config
     upload_url, result_url, auth_token = _extract_model_config(payload)
-    use_gateway = bool(upload_url and result_url and auth_token)
+    if not (upload_url and result_url and auth_token):
+        raise TranscribeError(
+            "缺少 model_config（需含 offline_asr_upload 与 offline_asr_get_result 的 endpoint 和 auth_token）。"
+            " 示例：{\"input\":{\"file_url\":\"https://.../x.mp3\"},\"model_config\":[...]}"
+        )
 
-    # 网关路径直接传 URL；直调讯飞路径需先下载到本地
-    if use_gateway:
-        audio_source = _extract_file_url(payload)
-        if not audio_source:
-            raise TranscribeError(
-                "网关转写缺少音频 URL，需提供 input.file_url。"
-                " 示例：{\"input\":{\"file_url\":\"https://.../x.mp3\"},\"model_config\":[...]}"
-            )
-        local_path = None
-        is_tmp = False
-    else:
-        local_path, is_tmp = _resolve_to_local(payload)
-        audio_source = local_path
+    # 提取音频 URL
+    audio_source = _extract_file_url(payload)
+    if not audio_source:
+        raise TranscribeError(
+            "缺少音频 URL，需提供 input.file_url。"
+            " 示例：{\"input\":{\"file_url\":\"https://.../x.mp3\"},\"model_config\":[...]}"
+        )
 
     if timing is not None:
         timing.agent_overhead = time.time() - t_agent_start
 
     try:
-        if use_gateway:
-            client = GatewayAsrClient(
-                upload_url=upload_url,
-                result_url=result_url,
-                auth_token=auth_token,
-                poll_interval=settings.poll_interval,
-                poll_max_wait=settings.poll_max_wait,
-            )
-        else:
-            # 过渡：直调讯飞（env 密钥），本地测试 / model_config 缺失时使用
-            try:
-                settings.validate()
-            except RuntimeError as e:
-                raise TranscribeError(str(e)) from e
-            client = XfyunAsrClient(
-                app_id=settings.app_id,
-                access_key_id=settings.access_key_id,
-                access_key_secret=settings.access_key_secret,
-                poll_interval=settings.poll_interval,
-                poll_max_wait=settings.poll_max_wait,
-            )
+        client = GatewayAsrClient(
+            upload_url=upload_url,
+            result_url=result_url,
+            auth_token=auth_token,
+            poll_interval=settings.poll_interval,
+            poll_max_wait=settings.poll_max_wait,
+        )
         return client.transcribe(
             audio_source, language=settings.language, pd=settings.pd,
             timing=timing,
         )
-    except (TranscribeError, InvalidAudioError):
+    except TranscribeError:
         raise
     except TimeoutError as e:
         raise TranscribeError(str(e)) from e
     except Exception as e:
         raise TranscribeError(str(e)) from e
-    finally:
-        if is_tmp and local_path and os.path.exists(local_path):
-            os.unlink(local_path)
