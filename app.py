@@ -8,7 +8,8 @@
 
 operation 路由（capabilities：同步+异步都支持）：
   - query_capabilities -> 200 SSE 事件，responseContent=能力字典字符串
-  - chat_completions（含无 operation 默认）-> 200 SSE 事件，responseContent=转写文本
+  - chat_completions（含无 operation 默认）-> 200 SSE 事件，
+                       responseContent={"message":{"sentences":[...]}}（说话人分段）
   - create_response    -> 200 SSE 事件，responseContent={response_id, status}
   - fetch_response     -> 200 SSE 事件，responseContent=转写文本/失败/进行中；404 E4006
   - 未知 operation      -> 400 E4001

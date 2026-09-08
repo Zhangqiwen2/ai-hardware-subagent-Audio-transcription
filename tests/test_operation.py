@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_tasks import AsyncTaskStore, TASK_TTL_SECONDS
 from operation_router import handle_invocation, CAPABILITIES, validate_capabilities
-from service import InvalidAudioError
+from iflytek_asr import InvalidAudioError
 
 
 def make_store(runner):
