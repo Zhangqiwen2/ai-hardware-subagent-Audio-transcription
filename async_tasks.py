@@ -81,3 +81,55 @@ class AsyncTaskStore:
         timing = TimingInfo()
         try:
             result = self._runner(request_payload, timing=timing)
+            # gateway 路径返回 dict {"text", "sentences"}
+            if isinstance(result, dict):
+                text = result.get("text", "")
+                sentences = result.get("sentences")
+            else:
+                text = result
+                sentences = None
+            timing.log_summary(label=f"async:{response_id[:12]}")
+            with self._lock:
+                if response_id in self._tasks:
+                    self._tasks[response_id]["status"] = STATUS_COMPLETED
+                    self._tasks[response_id]["text"] = text
+                    self._tasks[response_id]["sentences"] = sentences
+                    self._tasks[response_id]["completed_at"] = time.time()
+        except Exception as e:
+            timing.log_summary(label=f"async:{response_id[:12]}(failed)")
+            logger.exception("异步转写任务失败 response_id=%s", response_id)
+            # 客户端文件问题（E4002）与服务端故障（E5001）区分，便于主 Agent 决策
+            error_code = "E4002" if isinstance(e, InvalidAudioError) else "E5001"
+            with self._lock:
+                if response_id in self._tasks:
+                    self._tasks[response_id]["status"] = STATUS_FAILED
+                    self._tasks[response_id]["error"] = str(e)
+                    self._tasks[response_id]["error_code"] = error_code
+                    self._tasks[response_id]["completed_at"] = time.time()
+
+    def _evict_if_full(self):
+        """任务数达上限时先清过期，仍满则丢最旧任务（内存保护，调用方持锁）。"""
+        if len(self._tasks) < MAX_TASKS:
+            return
+        now = time.time()
+        expired = [rid for rid, t in self._tasks.items()
+                   if now - t["created_at"] > TASK_TTL_SECONDS]
+        for rid in expired:
+            del self._tasks[rid]
+        if len(self._tasks) >= MAX_TASKS:
+            oldest = min(self._tasks, key=lambda rid: self._tasks[rid]["created_at"])
+            del self._tasks[oldest]
+
+    def _start_cleanup_thread(self):
+        def _cleanup():
+            while True:
+                time.sleep(_CLEANUP_INTERVAL)
+                now = time.time()
+                with self._lock:
+                    expired = [rid for rid, t in self._tasks.items()
+                               if now - t["created_at"] > TASK_TTL_SECONDS]
+                    for rid in expired:
+                        del self._tasks[rid]
+                if expired:
+                    logger.info("周期清理过期任务 %d 个", len(expired))
+        threading.Thread(target=_cleanup, daemon=True).start()
