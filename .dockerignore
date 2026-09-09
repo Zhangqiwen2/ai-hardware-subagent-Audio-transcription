@@ -1,0 +1,11 @@
+# 构建镜像时排除敏感文件与缓存，避免密钥进入镜像
+.env
+.env.local
+__pycache__/
+*.pyc
+venv/
+.venv/
+tests/
+*.md
+.git/
+.gitignore
