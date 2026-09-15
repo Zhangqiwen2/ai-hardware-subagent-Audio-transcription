@@ -20,7 +20,7 @@ import time
 
 from config import settings
 from gateway_asr import GatewayAsrClient
-from iflytek_asr import TimingInfo
+from iflytek_asr import TimingInfo, XfyunDirectClient
 
 logger = logging.getLogger("transcribe_service")
 
@@ -42,7 +42,7 @@ def _extract_file_url(payload) -> str | None:
             return payload["file_url"]
         inp = payload.get("input")
         if isinstance(inp, dict) and inp.get("file_url"):
-            return inp.file_url
+            return inp.get("file_url")
     return None
 
 
@@ -82,13 +82,6 @@ def transcribe_from_payload(payload, timing: TimingInfo = None) -> dict:
     """
     t_agent_start = time.time()
 
-    upload_url, result_url, auth_token = _extract_model_config(payload)
-    if not (upload_url and result_url and auth_token):
-        raise TranscribeError(
-            "缺少 model_config（需含 offline_asr_upload 与 offline_asr_get_result 的 endpoint 和 auth_token）。"
-            " 示例：{\"input\":{\"file_url\":\"https://.../x.mp3\"},\"model_config\":[...]}"
-        )
-
     audio_source = _extract_file_url(payload)
     if not audio_source:
         raise TranscribeError(
@@ -98,6 +91,37 @@ def transcribe_from_payload(payload, timing: TimingInfo = None) -> dict:
 
     if timing is not None:
         timing.agent_overhead = time.time() - t_agent_start
+
+    # FORCE_DIRECT_IFLYTEK 自验证模式：绕过网关，直调讯飞（无需 model_config）
+    if settings.force_direct_iflytek.lower() == "true":
+        logger.info("FORCE_DIRECT_IFLYTEK=true，使用直调讯飞路径（自验证模式）")
+        try:
+            client = XfyunDirectClient(
+                app_id=settings.app_id,
+                access_key_id=settings.access_key_id,
+                access_key_secret=settings.access_key_secret,
+                poll_interval=settings.poll_interval,
+                poll_max_wait=settings.poll_max_wait,
+                tmp_dir=settings.tmp_dir,
+            )
+            return client.transcribe(
+                audio_source, language=settings.language, pd=settings.pd,
+                timing=timing,
+            )
+        except TranscribeError:
+            raise
+        except TimeoutError as e:
+            raise TranscribeError(str(e)) from e
+        except Exception as e:
+            raise TranscribeError(str(e)) from e
+
+    # 网关路径：需完整 model_config
+    upload_url, result_url, auth_token = _extract_model_config(payload)
+    if not (upload_url and result_url and auth_token):
+        raise TranscribeError(
+            "缺少 model_config（需含 offline_asr_upload 与 offline_asr_get_result 的 endpoint 和 auth_token）。"
+            " 示例：{\"input\":{\"file_url\":\"https://.../x.mp3\"},\"model_config\":[...]}"
+        )
 
     try:
         client = GatewayAsrClient(
