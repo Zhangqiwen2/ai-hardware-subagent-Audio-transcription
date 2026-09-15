@@ -40,6 +40,9 @@ class Settings:
     # 临时文件目录（接收上传/下载音频时使用）
     tmp_dir: str = field(default_factory=lambda: _env("TMP_DIR", "/tmp/asr_agent"))
 
+    # 自验证开关：设为 "true" 时绕过网关，直调讯飞（需配置 IFLYTEK_* 密钥）
+    force_direct_iflytek: str = field(default_factory=lambda: _env("FORCE_DIRECT_IFLYTEK", ""))
+
     def validate(self) -> None:
         """校验讯飞密钥是否已配置，缺失则抛出明确异常。"""
         missing = []

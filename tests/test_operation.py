@@ -43,7 +43,7 @@ def wait_status(store, response_id, status, timeout=5):
 def main():
     # ---- 1. query_capabilities ----
     validate_capabilities()
-    store = make_store(lambda req, **kw: "ok")
+    store = make_store(lambda req, **kw: {"text": "ok", "sentences": []})
     body, status = call({"inputs": {"operation": "query_capabilities"}}, store)
     assert status == 200, status
     assert body == {"capabilities": {"chat_completions": True,
@@ -62,7 +62,7 @@ def main():
     print("[3] 缺 inputs 包装 -> 400 E4001 OK")
 
     # ---- 4. chat_completions 同步转写（file_url 数组）----
-    sync_fn = lambda req, **kw: f"文本:{req['file_url']}"
+    sync_fn = lambda req, **kw: {"text": f"文本:{req['file_url']}", "sentences": []}
     body, status = call({"inputs": {"operation": "chat_completions",
                                      "file_url": ["https://x/a.wav"]}},
                         store, transcribe_fn=sync_fn)
@@ -109,7 +109,7 @@ def main():
     def slow_runner(req, **kw):
         started.set()
         release.wait(5)
-        return f"异步文本:{req['file_url']}"
+        return {"text": f"异步文本:{req['file_url']}", "sentences": []}
 
     store2 = make_store(slow_runner)
     body, status = call({"inputs": {"operation": "create_response",
@@ -128,8 +128,9 @@ def main():
                                      "response_id": rid}}, store2)
     assert status == 200, status
     assert body["id"] == rid and body["object"] == "response" and body["status"] == "completed", body
-    assert body["output"][0]["content"][0]["text"] == "异步文本:https://x/a.wav", body
-    print("[5] 异步全流程 + OpenAI response OK")
+    # text 字段保留，值从字符串改为 {"sentences": [...]}（runner 返回字符串，sentences 为空）
+    assert body["output"][0]["content"][0]["text"] == {"sentences": []}, body
+    print("[5] 异步全流程 + text 包 sentences OK")
 
     # ---- 6. fetch 缺 response_id / 不存在 ----
     body, status = call({"inputs": {"operation": "fetch_response"}}, store2)
@@ -168,7 +169,7 @@ def main():
     print("[7b] 异步音频无效 -> failed(E4002) OK")
 
     # ---- 8. 24h 过期 -> 404 E4006 ----
-    store4 = make_store(lambda req, **kw: "ok")
+    store4 = make_store(lambda req, **kw: {"text": "ok", "sentences": []})
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.wav"]}}, store4)
     rid4 = body["id"]
@@ -181,7 +182,7 @@ def main():
     print("[8] 24h 过期 -> 404 E4006 OK")
 
     # ---- 9. owner 归属校验 ----
-    store5 = make_store(lambda req, **kw: "ok")
+    store5 = make_store(lambda req, **kw: {"text": "ok", "sentences": []})
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.wav"]}},
                         store5, owner="userA")
@@ -196,7 +197,7 @@ def main():
 
     # ---- 10. model_config 提取（inputs 内）----
     captured = []
-    store6 = make_store(lambda req, **kw: captured.append(req) or "ok")
+    store6 = make_store(lambda req, **kw: captured.append(req) or {"text": "ok", "sentences": []})
     body, status = call({"inputs": {"operation": "create_response",
                                      "file_url": ["https://x/a.mp3"],
                                      "model_config": [{"type": "offline_asr"}]}}, store6)
@@ -234,6 +235,82 @@ def main():
     except RuntimeError as e:
         assert "识别失败" in str(e), e
     print("[13] failType 映射（静音/转码/超限/校验->E4002，识别失败->E5001）OK")
+
+    # ---- 14. 同步 responseContent.message 包 {"sentences": [...]}（字段名不变）----
+    def sync_speaker_fn(req, **kw):
+        return {"text": "全文", "sentences": [
+            {"text": "我们下周确认方案。", "speakerId": 1, "beginTimeMs": 4220, "endTimeMs": 6380},
+            {"text": "好的，我来记录下来。", "speakerId": 2, "beginTimeMs": 6710, "endTimeMs": 9210},
+        ]}
+    raw_body, raw_status = handle_invocation(
+        {"inputs": {"operation": "chat_completions", "file_url": ["https://x/a.wav"]}},
+        store, transcribe_fn=sync_speaker_fn)
+    assert raw_status == 200 and raw_body.get("__sse_stream__"), raw_body
+    resp_content = raw_body["response_content"]
+    # message 字段名不变，值从字符串改为 {"sentences": [...]}
+    assert "message" in resp_content and isinstance(resp_content["message"], dict), resp_content
+    assert "sentences" in resp_content["message"], resp_content
+    sentences = resp_content["message"]["sentences"]
+    assert len(sentences) == 2 and sentences[0]["speakerId"] == 1, sentences
+    assert raw_body["body"]["choices"][0]["message"]["content"] == "全文", raw_body
+    print("[14] 同步 responseContent.message = {\"sentences\": [...]} OK")
+
+    # ---- 15. 说话人分离：异步 output[0].content[0].text 包 {"sentences": [...]} ----
+    def async_speaker_runner(req, **kw):
+        return {"text": "全文", "sentences": [
+            {"text": "你好", "speakerId": 1, "beginTimeMs": 0, "endTimeMs": 100}]}
+    store7 = make_store(async_speaker_runner)
+    body, status = call({"inputs": {"operation": "create_response",
+                                     "file_url": ["https://x/a.wav"]}}, store7)
+    rid7 = body["id"]
+    wait_status(store7, rid7, "completed")
+    body, status = call({"inputs": {"operation": "fetch_response",
+                                     "response_id": rid7}}, store7)
+    assert status == 200 and body["status"] == "completed", (status, body)
+    # text 字段保留，值从字符串改为 {"sentences": [...]}
+    assert body["output"][0]["content"][0]["text"] == {"sentences": [
+        {"text": "你好", "speakerId": 1, "beginTimeMs": 0, "endTimeMs": 100}]}, body
+    print("[15] 异步 output[0].content[0].text = {\"sentences\": [...]} OK")
+
+    # ---- 16. FORCE_DIRECT_IFLYTEK 路径：无需 model_config，直调讯飞 ----
+    from unittest.mock import patch
+    from service import transcribe_from_payload
+
+    fake_direct_result = {"text": "直调结果", "sentences": [
+        {"text": "你好", "speakerId": 1, "beginTimeMs": 0, "endTimeMs": 500}]}
+
+    with patch("service.settings") as mock_settings:
+        mock_settings.force_direct_iflytek = "true"
+        mock_settings.app_id = "test-app"
+        mock_settings.access_key_id = "test-key"
+        mock_settings.access_key_secret = "test-secret"
+        mock_settings.language = "autodialect"
+        mock_settings.pd = ""
+        mock_settings.poll_interval = 1
+        mock_settings.poll_max_wait = 5
+        mock_settings.tmp_dir = "/tmp/test_asr"
+
+        with patch("service.XfyunDirectClient") as mock_client_cls:
+            mock_client_cls.return_value.transcribe.return_value = fake_direct_result
+            # 无需 model_config，只需 file_url
+            result = transcribe_from_payload({"input": {"file_url": "https://x/a.wav"}})
+            assert result == fake_direct_result, result
+            # 验证 XfyunDirectClient 被实例化
+            mock_client_cls.assert_called_once()
+            # 验证 transcribe 被调用，参数为 URL
+            mock_client_cls.return_value.transcribe.assert_called_once_with(
+                "https://x/a.wav", language="autodialect", pd="", timing=None)
+    print("[16] FORCE_DIRECT_IFLYTEK=true 直调路径 OK")
+
+    # 验证 FORCE_DIRECT_IFLYTEK 未设置时走网关路径（需 model_config）
+    with patch("service.settings") as mock_settings:
+        mock_settings.force_direct_iflytek = ""
+        try:
+            transcribe_from_payload({"input": {"file_url": "https://x/a.wav"}})
+            assert False, "应抛出 TranscribeError（缺 model_config）"
+        except Exception as e:
+            assert "缺少 model_config" in str(e), str(e)
+    print("[17] FORCE_DIRECT_IFLYTEK 未设置时走网关路径 OK")
 
     print("\n全部测试通过（统一 inputs 格式版）✓")
 

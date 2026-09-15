@@ -18,7 +18,7 @@ import time
 import requests
 
 from iflytek_asr import TimingInfo, raise_for_failtype, http_error_detail
-from result_parser import parse_order_result
+from result_parser import parse_order_result, parse_sentences
 
 logger = logging.getLogger("gateway_asr")
 
@@ -62,7 +62,12 @@ class GatewayAsrClient:
         if not file_url or not file_url.strip().lower().startswith(("http://", "https://")):
             raise ValueError(f"音频 URL 非法：{file_url}")
 
-        options = {"language": language}
+        options = {
+            "language": language,
+            # 说话人分离：通用角色分离 + 盲分（网关重新封装请求体时带给讯飞）
+            "roleType": 1,
+            "roleNum": 0,
+        }
         if pd:
             options["pd"] = pd
         body = {"audio_url": file_url, "options": options}
@@ -142,8 +147,8 @@ class GatewayAsrClient:
     # ---------- 一站式转写 ----------
 
     def transcribe(self, file_url: str, language: str = "autodialect", pd: str = "",
-                   timing: TimingInfo = None) -> str:
-        """提交 URL + 轮询 + 解析，返回转写纯文本。"""
+                   timing: TimingInfo = None) -> dict:
+        """提交 URL + 轮询 + 解析，返回 {"text": 纯文本, "sentences": 分段结果}。"""
         # --- 上传计时 ---
         t_upload_start = time.time()
         order_id = self.upload_audio(file_url, language=language, pd=pd)
@@ -155,6 +160,7 @@ class GatewayAsrClient:
         t_process_end = time.time()
 
         text = parse_order_result(result)
+        sentences = parse_sentences(result)
 
         # 填充 timing
         if timing is not None:
@@ -162,8 +168,8 @@ class GatewayAsrClient:
             timing.iflytek_process = t_process_end - t_process_start
             timing.log_summary(label="gateway")
 
-        logger.info("网关转写文本长度：%d", len(text))
-        return text
+        logger.info("网关转写文本长度：%d，分段数：%d", len(text), len(sentences))
+        return {"text": text, "sentences": sentences}
 
     @staticmethod
     def _parse_json(text: str) -> dict:

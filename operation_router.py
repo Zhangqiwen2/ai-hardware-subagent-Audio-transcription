@@ -78,8 +78,13 @@ def _extract_request(inputs: dict) -> dict:
     return result
 
 
-def _openai_response(response_id: str, text: str, task: dict) -> dict:
-    """completed 状态的完整 OpenAI response 格式。"""
+def _openai_response(response_id: str, text: str, task: dict, sentences: list | None = None) -> dict:
+    """completed 状态的完整 OpenAI response 格式。
+
+    sentences 存在时 text 字段为 {"sentences": [...]} 结构化数据，
+    否则为纯文本字符串（兼容旧测试 mock）。
+    """
+    text_content = {"sentences": sentences} if sentences is not None else text
     return {
         "id": response_id,
         "object": "response",
@@ -94,7 +99,7 @@ def _openai_response(response_id: str, text: str, task: dict) -> dict:
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
+                "content": [{"type": "output_text", "text": text_content, "annotations": []}],
             }
         ],
         "metadata": None,
@@ -211,17 +216,21 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         except Exception as e:
             logger.exception("转写异常: file_url=%s", request.get("file_url"))
             return _error("E5001", f"转写失败: {e}", "transcribe_failed", 500)
-        # gateway 路径返回 dict {"text", "sentences"}，取 text
+        # gateway 路径返回 dict {"text", "sentences"}，取 text 和 sentences
         if isinstance(result, dict):
             text = result.get("text", "")
+            sentences = result.get("sentences")
         else:
             text = result
+            sentences = None
         timing.log_summary(label="sync")
         body = _chat_completion(text)
         logger.info("chat_completions 成功: text_len=%d, file_url=%s", len(text), request.get("file_url"))
         # 讯飞不支持流式，但主 Agent 以 SSE 流式调用。
         # 将非流式结果包装为 SSE 格式返回，使主 Agent 能正常解析。
-        return _sse(body, {"message": text}), 200
+        # sentences 存在时 message 为 {"sentences": [...]}，否则为纯文本字符串
+        message_content = {"sentences": sentences} if sentences is not None else text
+        return _sse(body, {"message": message_content}), 200
 
     # create_response：创建异步转写任务
     if operation == "create_response":
@@ -254,7 +263,7 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
     if task["status"] == "completed":
         logger.info("fetch_response 完成: response_id=%s, text_len=%d", response_id, len(task["text"] or ""))
         # 异步操作直接返回 OpenAI response 格式 body，不包 SSE
-        return _openai_response(response_id, task["text"] or "", task), 200
+        return _openai_response(response_id, task["text"] or "", task, sentences=task.get("sentences")), 200
     if task["status"] == "failed":
         logger.warning("fetch_response 失败: response_id=%s, error=%s", response_id, task.get("error"))
         return _failed_response(response_id, task), 200
