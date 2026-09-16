@@ -128,9 +128,9 @@ def main():
                                      "response_id": rid}}, store2)
     assert status == 200, status
     assert body["id"] == rid and body["object"] == "response" and body["status"] == "completed", body
-    # text 字段保留，值从字符串改为 {"sentences": [...]}（runner 返回字符串，sentences 为空）
-    assert body["output"][0]["content"][0]["text"] == {"sentences": []}, body
-    print("[5] 异步全流程 + text 包 sentences OK")
+    # text 字段保留，值为 JSON 字符串 '{"sentences": [...]}'（runner 返回 dict，sentences 为空列表）
+    assert body["output"][0]["content"][0]["text"] == '{"sentences": []}', body
+    print("[5] 异步全流程 + text=JSON字符串 OK")
 
     # ---- 6. fetch 缺 response_id / 不存在 ----
     body, status = call({"inputs": {"operation": "fetch_response"}}, store2)
@@ -247,13 +247,13 @@ def main():
         store, transcribe_fn=sync_speaker_fn)
     assert raw_status == 200 and raw_body.get("__sse_stream__"), raw_body
     resp_content = raw_body["response_content"]
-    # message 字段名不变，值从字符串改为 {"sentences": [...]}
-    assert "message" in resp_content and isinstance(resp_content["message"], dict), resp_content
-    assert "sentences" in resp_content["message"], resp_content
-    sentences = resp_content["message"]["sentences"]
+    # message 字段名不变，值为 JSON 字符串 '{"sentences": [...]}'（text 必须是字符串）
+    assert "message" in resp_content and isinstance(resp_content["message"], str), resp_content
+    import json as _json
+    sentences = _json.loads(resp_content["message"])["sentences"]
     assert len(sentences) == 2 and sentences[0]["speakerId"] == 1, sentences
     assert raw_body["body"]["choices"][0]["message"]["content"] == "全文", raw_body
-    print("[14] 同步 responseContent.message = {\"sentences\": [...]} OK")
+    print("[14] 同步 responseContent.message = JSON字符串({'sentences': [...]}) OK")
 
     # ---- 15. 说话人分离：异步 output[0].content[0].text 包 {"sentences": [...]} ----
     def async_speaker_runner(req, **kw):
@@ -267,10 +267,12 @@ def main():
     body, status = call({"inputs": {"operation": "fetch_response",
                                      "response_id": rid7}}, store7)
     assert status == 200 and body["status"] == "completed", (status, body)
-    # text 字段保留，值从字符串改为 {"sentences": [...]}
-    assert body["output"][0]["content"][0]["text"] == {"sentences": [
-        {"text": "你好", "speakerId": 1, "beginTimeMs": 0, "endTimeMs": 100}]}, body
-    print("[15] 异步 output[0].content[0].text = {\"sentences\": [...]} OK")
+    # text 字段保留，值为 JSON 字符串 '{"sentences": [...]}'（text 必须是字符串）
+    import json as _json
+    assert body["output"][0]["content"][0]["text"] == _json.dumps(
+        {"sentences": [{"text": "你好", "speakerId": 1, "beginTimeMs": 0, "endTimeMs": 100}]},
+        ensure_ascii=False), body
+    print("[15] 异步 output[0].content[0].text = JSON字符串({'sentences': [...]}) OK")
 
     # ---- 16. FORCE_DIRECT_IFLYTEK 路径：无需 model_config，直调讯飞 ----
     from unittest.mock import patch

@@ -78,13 +78,25 @@ def _extract_request(inputs: dict) -> dict:
     return result
 
 
+def _structured_text(text: str, sentences: list | None) -> str:
+    """说话人分离返回格式：text/message 必须是字符串，sentences 用 JSON 序列化。
+
+    OpenAI response 规范要求 content[].text 为字符串；主 Agent 解析器遇到 dict
+    会丢弃内容（表现 output 空）。这里将结构化 sentences 序列化为 JSON 字符串，
+    主 Agent 拿到后 json.loads 扁平化即可，纯文本场景原样返回。
+    """
+    if sentences is None:
+        return text
+    return json.dumps({"sentences": sentences}, ensure_ascii=False)
+
+
 def _openai_response(response_id: str, text: str, task: dict, sentences: list | None = None) -> dict:
     """completed 状态的完整 OpenAI response 格式。
 
-    sentences 存在时 text 字段为 {"sentences": [...]} 结构化数据，
-    否则为纯文本字符串（兼容旧测试 mock）。
+    sentences 存在时 text 字段为 JSON 字符串 '{"sentences": [...]}'（text 必须是
+    字符串，主 Agent 解析后扁平化），否则为纯文本字符串（兼容旧测试 mock）。
     """
-    text_content = {"sentences": sentences} if sentences is not None else text
+    text_content = _structured_text(text, sentences)
     return {
         "id": response_id,
         "object": "response",
@@ -228,8 +240,9 @@ def handle_invocation(payload, task_store: AsyncTaskStore, owner=None,
         logger.info("chat_completions 成功: text_len=%d, file_url=%s", len(text), request.get("file_url"))
         # 讯飞不支持流式，但主 Agent 以 SSE 流式调用。
         # 将非流式结果包装为 SSE 格式返回，使主 Agent 能正常解析。
-        # sentences 存在时 message 为 {"sentences": [...]}，否则为纯文本字符串
-        message_content = {"sentences": sentences} if sentences is not None else text
+        # sentences 存在时 message 为 JSON 字符串 '{"sentences": [...]}'（text 必须是
+        # 字符串，主 Agent 解析后扁平化），否则为纯文本字符串
+        message_content = _structured_text(text, sentences)
         return _sse(body, {"message": message_content}), 200
 
     # create_response：创建异步转写任务
